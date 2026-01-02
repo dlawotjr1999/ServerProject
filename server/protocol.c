@@ -15,7 +15,7 @@ int protocol_parse(connection_t* conn, packet_t* out)
         return -1;
 
     /* 전체 패킷이 아직 안 들어옴 */
-    if (conn->recv_len < pkt_len + sizeof(uint16_t))
+    if ((size_t)conn->recv_len < pkt_len + sizeof(uint16_t))
         return 0;
 
     uint16_t pkt_type;

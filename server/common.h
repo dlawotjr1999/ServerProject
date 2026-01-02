@@ -49,21 +49,13 @@ typedef struct {
 
 typedef struct {
 	int fd;
+	packet_t packet;
+} job_t;
+
+typedef struct {
+	int fd;
 	char recv_buf[RECV_BUF_SIZE];
 	int recv_len;
 } connection_t;
-
-typedef struct {
-	int session_id;
-	int fd;
-	int room_id;
-} session_t;
-
-typedef struct {
-	int room_id;
-	session_t* users[MAX_ROOM_USER];
-	int user_count;
-	pthread_mutex_t lock;
-} room_t;
 
 #endif

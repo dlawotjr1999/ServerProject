@@ -1,11 +1,15 @@
 #include "common.h"
 #include "net.h"
 #include "protocol.h"
+#include "job_queue.h"
+#include "state.h"
 
 static int listen_fd = -1;
 static int epfd = -1;
 
 static connection_t* connections[MAX_CLIENTS];
+
+extern job_queue_t g_job_queue;
 
 static void close_connection(int fd)
 {
@@ -13,6 +17,7 @@ static void close_connection(int fd)
 	if (!conn) return;
 
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+	session_remove(fd);
 	close(fd);
 	free(conn);
 	connections[fd] = NULL;
@@ -154,6 +159,12 @@ void net_run() {
 						while (1) {
 							int r = protocol_parse(conn, &pkt);
 							if (r == 1) {
+								job_t job;
+								job.fd = cfd;
+								job.packet = pkt;
+
+								job_queue_push(&g_job_queue, &job);
+
 								printf("[PACKET] fd=%d type=%d len=%d\n",
 									cfd, pkt.type, pkt.length);
 							}
