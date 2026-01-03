@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -34,11 +35,11 @@
 #define JOB_QUEUE_SIZE 1024
 
 typedef enum {
-	PKT_CHAT = 1,
-	PKT_JOIN_ROOM,
-	PKT_LEAVE_ROOM,
-	PKT_GAME_ACTION,
-	PKT_GAME_RESULT,
+	PKT_CHAT = 1,        // 채팅
+	PKT_JOIN_ROOM,       // 방 입장
+	PKT_LEAVE_ROOM,      // 방 퇴장
+	PKT_GAME_ACTION,     // 게임 입력
+	PKT_GAME_RESULT,     // 게임 결과
 } packet_type_t;
 
 typedef struct {
@@ -54,8 +55,15 @@ typedef struct {
 
 typedef struct {
 	int fd;
+
+	// recv
 	char recv_buf[RECV_BUF_SIZE];
 	int recv_len;
+
+	// send
+	char send_buf[SEND_BUF_SIZE];
+	int send_len;
+	int send_offset;
 } connection_t;
 
 #endif

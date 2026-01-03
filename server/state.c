@@ -24,6 +24,7 @@ session_t* session_get_or_create(int fd)
     s->session_id = next_session_id++;
     s->fd = fd;
     s->room_id = -1;
+    s->alive = true;
 
     sessions[fd] = s;
 
@@ -41,34 +42,16 @@ void session_remove(int fd)
     session_t* s = sessions[fd];
     if (!s)
         return;
+    s->alive = false;
 
-    room_leave(s);
+    if(s->room_id >= 0)
+        room_leave(s);
 
     printf("[SESSION] removed sid=%d fd=%d\n",
         s->session_id, fd);
 
     free(s);
     sessions[fd] = NULL;
-}
-
-void packet_send(int fd, packet_t* pkt)
-{
-    uint16_t net_len = htons(pkt->length);
-    uint16_t net_type = htons(pkt->type);
-
-    char buf[sizeof(uint16_t) * 2 + MAX_PACKET_SIZE];
-    int offset = 0;
-
-    memcpy(buf + offset, &net_len, sizeof(uint16_t));
-    offset += sizeof(uint16_t);
-
-    memcpy(buf + offset, &net_type, sizeof(uint16_t));
-    offset += sizeof(uint16_t);
-
-    memcpy(buf + offset, pkt->payload, pkt->length - sizeof(uint16_t));
-    offset += pkt->length - sizeof(uint16_t);
-
-    send(fd, buf, offset, 0);
 }
 
 room_t* room_find_or_create(void)
@@ -99,8 +82,7 @@ room_t* room_get(int room_id)
     return &rooms[room_id];
 }
 
-void room_join(room_t* room, session_t* s)
-{
+void room_join(room_t* room, session_t* s) {
     pthread_mutex_lock(&room->lock);
 
     if (room->user_count >= MAX_ROOM_USER) {
@@ -117,8 +99,7 @@ void room_join(room_t* room, session_t* s)
     pthread_mutex_unlock(&room->lock);
 }
 
-void room_leave(session_t* s)
-{
+void room_leave(session_t* s) {
     if (s->room_id < 0)
         return;
 
@@ -142,19 +123,24 @@ void room_leave(session_t* s)
     pthread_mutex_unlock(&room->lock);
 }
 
-
 void room_broadcast(room_t* room, session_t* sender, packet_t* pkt)
 {
+    int fds[MAX_ROOM_USER];
+    int count = 0;
+    int except_fd = sender ? sender->fd : -1;
+
     pthread_mutex_lock(&room->lock);
-
-    for (int i = 0; i < room->user_count; i++) {
-        session_t* target = room->users[i];
-
-        if (target == sender)
-            continue;
-
-        packet_send(target->fd, pkt);
+    for (int i = 0; i < room->user_count; ++i) {
+        session_t* s = room->users[i];
+        if (!s) continue;
+        if (s->fd == except_fd) continue;
+        fds[count++] = s->fd;
     }
-
     pthread_mutex_unlock(&room->lock);
+
+    // I/O는 lock 밖에서
+    for (int i = 0; i < count; ++i) {
+        packet_send(fds[i], pkt);
+    }
 }
+

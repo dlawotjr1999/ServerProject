@@ -13,6 +13,12 @@ typedef struct {
 	pthread_cond_t cond;
 } job_queue_t;
 
+typedef enum {
+	JOB_PACKET,
+	JOB_DISCONNECT,
+	JOB_SHUTDOWN
+} job_type_t;
+
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
 void job_queue_pop(job_queue_t* q, job_t* out);

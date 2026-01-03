@@ -2,11 +2,17 @@
 #define STATE_H
 
 #include "common.h"
+#include "net.h"
 
 typedef struct session {
 	int session_id;
 	int fd;
 	int room_id;
+	bool alive;
+
+	char send_buf[SEND_BUF_SIZE];
+	size_t size_len;
+	size_t size_offset;
 } session_t;
 
 typedef struct room {

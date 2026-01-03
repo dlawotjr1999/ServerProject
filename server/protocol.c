@@ -27,16 +27,12 @@ int protocol_parse(connection_t* conn, packet_t* out)
 
     int payload_len = pkt_len - sizeof(uint16_t);
     if (payload_len > 0) {
-        memcpy(out->payload,
-            conn->recv_buf + 4,
-            payload_len);
+        memcpy(out->payload, conn->recv_buf + 4, payload_len);
     }
 
     /* recv_buf ¾ÕÀ¸·Î ´ç±è */
     int remain = conn->recv_len - (pkt_len + 2);
-    memmove(conn->recv_buf,
-        conn->recv_buf + pkt_len + 2,
-        remain);
+    memmove(conn->recv_buf, conn->recv_buf + pkt_len + 2, remain);
     conn->recv_len = remain;
 
     return 1;
