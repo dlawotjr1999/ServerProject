@@ -8,11 +8,11 @@
 #include "logic.h"
 #include "job_queue.h"
 
-volatile sig_atomic_t g_running = 1;
 job_queue_t g_job_queue;
 
 void handle_sigint(int sig) {
-	g_running = 0;
+	if(sig == SIGINT || sig == SIGTERM)
+		job_queue_push_shutdown(&g_job_queue);
 }
 
 int main() {
@@ -31,11 +31,12 @@ int main() {
 		pthread_detach(tid);
 	}
 
+
 	if (net_init() < 0) {
 		fprintf(stderr, "net_init failed\n");
 		exit(1);
 	}
-	while(g_running) {
+	while(1) {
 		net_run();
 	}
 

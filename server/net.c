@@ -124,7 +124,7 @@ void net_run() {
 
 			// 에러와 끊김 처리
 			if (ev & (EPOLLERR | EPOLLHUP)) {
-				close_connection(fd);
+				job_queue_push_disconnect(&g_job_queue, fd);
 				continue;
 			}
 
@@ -213,7 +213,7 @@ void net_run() {
 					}
 					else if (n == 0) {
 						// 정상 종료
-						close_connection(fd);
+						job_queue_push_disconnect(&g_job_queue, fd);
 						break;
 					}
 					else {
@@ -221,7 +221,7 @@ void net_run() {
 							break;
 						}
 						else {
-							close_connection(fd);
+							job_queue_push_disconnect(&g_job_queue, fd);
 							break;
 						}
 					}
@@ -248,7 +248,7 @@ void net_run() {
 					else if (n < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
-						close_connection(fd);
+						job_queue_push_disconnect(&g_job_queue, fd);
 						break;
 					}
 				}

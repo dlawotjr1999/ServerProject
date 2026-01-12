@@ -34,26 +34,22 @@ void job_queue_pop(job_queue_t* q, job_t* out) {
 	pthread_mutex_unlock(&q->mutex);
 }
 
-void job_queue_push_packet(int fd, packet_t* pkt) {
-	job_t job = {
-		.type = JOB_PACKET,
-		.fd = fd,
-		.pkt = *pkt
-	};
-	job_queue_push(&g_job_queue, &job);
+void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt) {
+	job_t job = {.type = JOB_PACKET, .fd = fd, .packet = *pkt };
+	job_queue_push(q, &job);
 }
 
-void job_queue_push_disconnect(int fd) {
+void job_queue_push_disconnect(job_queue_t* q, int fd) {
 	job_t job = {
 		.type = JOB_DISCONNECT,
 		.fd = fd
 	};
-	job_queue_push(&g_job_queue, &job);
+	job_queue_push(q, &job);
 }
 
-void job_queue_push_shutdown(void) {
+void job_queue_push_shutdown(job_queue_t* q) {
 	job_t job = {
 		.type = JOB_SHUTDOWN
 	};
-	job_queue_push(&g_job_queue, &job);
+	job_queue_push(q, &job);
 }

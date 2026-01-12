@@ -4,6 +4,7 @@
 #include "common.h"
 #include "net.h"
 
+// 세션 정보 구조체
 typedef struct session {
 	int session_id;
 	int fd;
@@ -15,6 +16,7 @@ typedef struct session {
 	size_t size_offset;
 } session_t;
 
+// 방 정보 구조체
 typedef struct room {
 	int room_id;
 	session_t* users[MAX_ROOM_USER];

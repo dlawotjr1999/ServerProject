@@ -4,6 +4,18 @@
 #include <pthread.h>
 #include "common.h"
 
+typedef enum {
+	JOB_PACKET,
+	JOB_DISCONNECT,
+	JOB_SHUTDOWN
+} job_type_t;
+
+typedef struct {
+	job_type_t type;
+	int fd;
+	packet_t packet;
+} job_t;
+
 typedef struct {
 	job_t jobs[JOB_QUEUE_SIZE];
 	int head;
@@ -13,14 +25,12 @@ typedef struct {
 	pthread_cond_t cond;
 } job_queue_t;
 
-typedef enum {
-	JOB_PACKET,
-	JOB_DISCONNECT,
-	JOB_SHUTDOWN
-} job_type_t;
-
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
 void job_queue_pop(job_queue_t* q, job_t* out);
+
+void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt);
+void job_queue_push_disconnect(job_queue_t* q, int fd);
+void job_queue_push_shutdown(job_queue_t* q);
 
 #endif

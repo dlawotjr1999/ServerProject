@@ -43,27 +43,22 @@ typedef enum {
 } packet_type_t;
 
 typedef struct {
-	uint16_t type;
-	uint16_t length;
-	char payload[MAX_PACKET_SIZE];
+	uint16_t type;					// 프로토콜 종류
+	uint16_t length;				// payload 실제 길이
+	char payload[MAX_PACKET_SIZE];	// 가변 데이터 영역
 } packet_t;
-
-typedef struct {
-	int fd;
-	packet_t packet;
-} job_t;
 
 typedef struct {
 	int fd;
 
 	// recv
-	char recv_buf[RECV_BUF_SIZE];
-	int recv_len;
+	char recv_buf[RECV_BUF_SIZE];	// 수신 버퍼
+	int recv_len;					// 현재 수신된 버퍼 길이	
 
 	// send
-	char send_buf[SEND_BUF_SIZE];
-	int send_len;
-	int send_offset;
+	char send_buf[SEND_BUF_SIZE];	// 송신 버퍼
+	int send_len;					// 송신해야 할 전체 데이터 길이
+	int send_offset;				// 이미 전송된 바이트 수(부분 전송을 위해 필요)
 } connection_t;
 
 #endif
