@@ -7,8 +7,14 @@
 typedef enum {
 	JOB_PACKET,
 	JOB_DISCONNECT,
-	JOB_SHUTDOWN
+	JOB_SHUTDOWN,
+	JOB_SEND
 } job_type_t;
+
+typedef enum {
+	JOBQ_BLOCK,
+	JOBQ_NONBLOCK
+} jobq_mode_t;
 
 typedef struct {
 	job_type_t type;
@@ -27,7 +33,7 @@ typedef struct {
 
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
-void job_queue_pop(job_queue_t* q, job_t* out);
+int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode);
 
 void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt);
 void job_queue_push_disconnect(job_queue_t* q, int fd);

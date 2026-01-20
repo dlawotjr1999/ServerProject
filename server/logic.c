@@ -15,7 +15,7 @@ void* worker_thread(void* arg)
     job_t job;
 
     while (1) {
-        job_queue_pop(&g_job_queue, &job);
+        job_queue_pop(&g_job_queue, &job, JOBQ_BLOCK);
 
         switch (job.type) {
 
@@ -53,7 +53,6 @@ void* worker_thread(void* arg)
 
     return NULL;
 }
-
 
 static void handle_packet(session_t* s, packet_t* pkt) {
     if (!s || !s->alive)

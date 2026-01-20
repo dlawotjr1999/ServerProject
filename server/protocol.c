@@ -21,9 +21,9 @@ int protocol_parse(connection_t* conn, packet_t* out)
 
     /*
     * 정상 패킷 여부 확인
-    * 길이가 0이거나 최대 payload 크기를 초과하면 비정상 패킷으로 판단
+    * 전체 패킷 길이가 2보다 작거나 최대 (payload + length) 크기를 초과하면 비정상 패킷으로 판단
     */
-    if (pkt_len == 0 || pkt_len > MAX_PACKET_SIZE)
+    if (pkt_len < 2 || pkt_len > (MAX_PACKET_SIZE + 2))
         return -1;
 
     /* 
@@ -37,7 +37,6 @@ int protocol_parse(connection_t* conn, packet_t* out)
     * 패킷 타입 필드 추출 : recv_buf[2~3]
     * 이후 호스트 순서로 변환
     */
-    uint16_t
     uint16_t pkt_type;
     memcpy(&pkt_type, conn->recv_buf + 2, sizeof(uint16_t));
     pkt_type = ntohs(pkt_type);

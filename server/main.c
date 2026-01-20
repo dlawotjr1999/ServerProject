@@ -10,9 +10,11 @@
 
 job_queue_t g_job_queue;
 
+volatile sig_atomic_t g_terminate = 0;
+
 void handle_sigint(int sig) {
-	if(sig == SIGINT || sig == SIGTERM)
-		job_queue_push_shutdown(&g_job_queue);
+	if (sig == SIGINT || sig == SIGTERM)
+		g_terminate = 1;
 }
 
 int main() {
@@ -36,8 +38,10 @@ int main() {
 		fprintf(stderr, "net_init failed\n");
 		exit(1);
 	}
-	while(1) {
-		net_run();
+
+	net_run();
+	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
+		job_queue_push_shutdown(&g_job_queue);
 	}
 
 	return 0;

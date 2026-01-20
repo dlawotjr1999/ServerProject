@@ -41,14 +41,35 @@ int packet_send(int fd, packet_t* pkt) {
 	if (!conn)
 		return -1;
 
-	int total_len = pkt->length + sizeof(uint16_t);
+	/* pkt->length는 (type + payload) 길이 */
+	if (pkt->length < 2 || pkt->length > MAX_PACKET_SIZE + 2)
+		return -1;
+
+	int payload_len = pkt->length - 2;
+	if (payload_len < 0)
+		return -1;
+
+	int total_len = 2 + pkt->length; // length(2) + (type + payload)
 
 	if (conn->send_len + total_len > SEND_BUF_SIZE)
 		return -1;
 
+	/* === 안전한 직렬화 시작 === */
 	uint16_t net_len = htons(pkt->length);
+	uint16_t net_type = htons(pkt->type);
+
+	/* length */
 	memcpy(conn->send_buf + conn->send_len, &net_len, 2);
-	memcpy(conn->send_buf + conn->send_len + 2, &pkt->type, pkt->length);
+
+	/* type */
+	memcpy(conn->send_buf + conn->send_len + 2, &net_type, 2);
+
+	/* payload */
+	if (payload_len > 0) {
+		memcpy(conn->send_buf + conn->send_len + 4,
+			pkt->payload,
+			payload_len);
+	}
 
 	conn->send_len += total_len;
 
@@ -60,6 +81,21 @@ int packet_send(int fd, packet_t* pkt) {
 
 	return 0;
 }
+
+static void handle_send_job(job_t* job)
+{
+	int fd = job->fd;
+	connection_t* conn = connections[fd];
+
+	// 이미 끊긴 경우 → 조용히 무시
+	if (!conn)
+		return;
+
+	if (packet_send(fd, &job->packet) < 0) {
+		job_queue_push_disconnect(&g_job_queue, fd);
+	}
+}
+
 
 int net_init() {
 	struct sockaddr_in addr;
@@ -111,11 +147,24 @@ int net_init() {
 void net_run() {
 	struct epoll_event events[MAX_EVENTS];
 
-	while (1) {
+	while (!g_terminate) {
 		int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
 		if (n < 0) {
-			perror("epoll wait error");
-			continue;
+			if (errno == EINTR)
+				continue;
+		}
+		perror("epoll wait error");
+		break;
+
+		job_t job;
+		while (job_queue_pop(&g_job_queue, &job, JOBQ_NONBLOCK)) {
+			if (job.type == JOB_SEND) {
+				handle_send_job(&job);
+			}
+			else {
+				// JOB_PACKET / DISCONNECT는 다시 worker로
+				job_queue_push(&g_job_queue, &job);
+			}
 		}
 
 		for (int i = 0; i < n; ++i) {
@@ -158,6 +207,8 @@ void net_run() {
 
 				conn->fd = client_fd;
 				conn->recv_len = 0;
+				conn->send_len = 0;
+				conn->send_offset = 0;
 				memset(conn->recv_buf, 0, RECV_BUF_SIZE);
 
 				connections[client_fd] = conn;
@@ -202,7 +253,7 @@ void net_run() {
 							if (connection_closed)
 								break;
 
-							job_t job;
+							job_t job = { 0 };
 							job.fd = cfd;
 							job.packet = pkt;
 
@@ -267,5 +318,21 @@ void net_run() {
 			}
 
 		}
+	}
+
+	if (listen_fd >= 0) {
+		close(listen_fd);
+		listen_fd = -1;
+	}
+
+	for (int fd = 0; fd < MAX_CLIENTS; fd++) {
+		if (connections[fd]) {
+			close_connection(fd);
+		}
+	}
+
+	if (epfd >= 0) {
+		close(epfd);
+		epfd = -1;
 	}
 }

@@ -34,6 +34,8 @@
 #define WORKER_THREAD_NUM 4
 #define JOB_QUEUE_SIZE 1024
 
+extern volatile sig_atomic_t g_terminate;
+
 typedef enum {
 	PKT_CHAT = 1,        // 채팅
 	PKT_JOIN_ROOM,       // 방 입장

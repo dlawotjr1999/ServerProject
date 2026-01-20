@@ -1,4 +1,5 @@
 #include "state.h"
+#include "job_queue.h"
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -7,6 +8,8 @@ static int next_session_id = 1;
 
 static room_t rooms[MAX_ROOMS];
 static int room_count = 0;
+
+extern job_queue_t g_job_queue;
 
 session_t* session_get_or_create(int fd)
 {
@@ -138,9 +141,26 @@ void room_broadcast(room_t* room, session_t* sender, packet_t* pkt)
     }
     pthread_mutex_unlock(&room->lock);
 
+    packet_t out = { 0 };
+
+    int payload_len = pkt->length - 2;
+    if (payload_len <= 0) return;
+
+    int n = snprintf(out.payload, MAX_PACKET_SIZE, "%.*s\n", payload_len, pkt->payload);
+    if (n <= 0 || n >= MAX_PACKET_SIZE) 
+        return;
+
+    out.type = PKT_CHAT;
+    out.length = 2 + n;
+
     // I/O는 lock 밖에서
     for (int i = 0; i < count; ++i) {
-        packet_send(fds[i], pkt);
+        job_t job = { 0 };
+        job.type = JOB_SEND;
+        job.fd = fds[i];
+        job.packet = out;   // 반드시 out
+
+        job_queue_push(&g_job_queue, &job);
     }
 }
 

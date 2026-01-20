@@ -20,11 +20,16 @@ void job_queue_push(job_queue_t *q, job_t* job) {
 	pthread_mutex_unlock(&q->mutex);
 }
 
-void job_queue_pop(job_queue_t* q, job_t* out) {
+int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode) {
 	pthread_mutex_lock(&q->mutex);
 
-	while(q->count == 0) 
+	while (q->count == 0) {
+		if (mode == JOBQ_NONBLOCK) {
+			pthread_mutex_unlock(&q->mutex);
+			return 0;   // 비어 있음
+		}
 		pthread_cond_wait(&q->cond, &q->mutex);
+	}
 
 	*out = q->jobs[q->head];
 	q->head = (q->head + 1) % JOB_QUEUE_SIZE;
@@ -32,6 +37,8 @@ void job_queue_pop(job_queue_t* q, job_t* out) {
 
 	pthread_cond_signal(&q->cond);
 	pthread_mutex_unlock(&q->mutex);
+
+	return 1;
 }
 
 void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt) {
