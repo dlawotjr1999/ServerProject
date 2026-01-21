@@ -2,7 +2,6 @@
 #define STATE_H
 
 #include "common.h"
-#include "net.h"
 
 // 세션 정보 구조체
 typedef struct session {
@@ -25,12 +24,15 @@ typedef struct room {
 } room_t;
 
 /* session API */
-session_t* session_get_or_create(int fd);
+session_t* session_get(int fd);       // 조회만 (생성 X)
+session_t* session_create(int fd);    // 생성만 (없을 때만 생성)
 void session_remove(int fd);
 
 /* room API */
-room_t* room_find_or_create(void);
-room_t* room_get(int room_id);
+room_t* room_get(int room_id);  // 
+room_t* room_create(void);      //     
+room_t* room_find(void);
+
 void room_join(room_t* room, session_t* s);
 void room_leave(session_t* s);
 void room_broadcast(room_t* room, session_t* sender, packet_t* pkt);

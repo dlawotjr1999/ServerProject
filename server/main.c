@@ -8,7 +8,8 @@
 #include "logic.h"
 #include "job_queue.h"
 
-job_queue_t g_job_queue;
+job_queue_t g_logic_q;
+job_queue_t g_io_q;
 
 volatile sig_atomic_t g_terminate = 0;
 
@@ -22,7 +23,8 @@ int main() {
 	signal(SIGINT, handle_sigint);
 	signal(SIGTERM, handle_sigint);
 
-	job_queue_init(&g_job_queue);
+	job_queue_init(&g_logic_q);
+	job_queue_init(&g_io_q);
 
 	for(int i = 0; i < WORKER_THREAD_NUM; ++i) {
 		pthread_t tid;
@@ -41,7 +43,7 @@ int main() {
 
 	net_run();
 	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
-		job_queue_push_shutdown(&g_job_queue);
+		job_queue_push_shutdown(&g_logic_q);
 	}
 
 	return 0;

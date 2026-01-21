@@ -3,7 +3,7 @@
 #include "state.h"
 #include <stdio.h>
 
-extern job_queue_t g_job_queue;
+extern job_queue_t g_logic_q;
 
 static void handle_packet(session_t* s, packet_t* pkt);
 static void handle_disconnect(int fd);
@@ -15,12 +15,14 @@ void* worker_thread(void* arg)
     job_t job;
 
     while (1) {
-        job_queue_pop(&g_job_queue, &job, JOBQ_BLOCK);
+        job_queue_pop(&g_logic_q, &job, JOBQ_BLOCK);
 
         switch (job.type) {
 
         case JOB_PACKET: {
-            session_t* s = session_get_or_create(job.fd);
+            session_t* s = session_get(job.fd);
+            if (!s) s = session_create(job.fd);
+
             if (!s || !s->alive) {
                 printf("[ERROR] session create failed fd=%d\n", job.fd);
                 break;
@@ -64,9 +66,9 @@ static void handle_packet(session_t* s, packet_t* pkt) {
         if (s->room_id >= 0)
             break;
 
-        room_t* r = room_find_or_create();
-        if (r)
-            room_join(r, s);
+        room_t* r = room_find();
+        if (!r) r = room_create();
+        room_join(r, s);
         break;
     }
 
@@ -96,7 +98,7 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 
 static void handle_disconnect(int fd)
 {
-    session_t* s = session_get_or_create(fd);
+    session_t* s = session_get(fd);
     if (!s) {
         // 이미 정리됐거나, 세션 생성 전 끊긴 경우
         return;
@@ -118,7 +120,7 @@ static void handle_shutdown(void)
     printf("[LOGIC] graceful shutdown started\n");
 
     for (int fd = 0; fd < MAX_CLIENTS; ++fd) {
-        session_t* s = session_get_or_create(fd);
+        session_t* s = session_get(fd);
         if (!s)
             continue;
 

@@ -23,7 +23,7 @@ int protocol_parse(connection_t* conn, packet_t* out)
     * 정상 패킷 여부 확인
     * 전체 패킷 길이가 2보다 작거나 최대 (payload + length) 크기를 초과하면 비정상 패킷으로 판단
     */
-    if (pkt_len < 2 || pkt_len > (MAX_PACKET_SIZE + 2))
+    if (pkt_len < 2 || pkt_len >(MAX_PACKET_SIZE + 2)) 
         return -1;
 
     /* 

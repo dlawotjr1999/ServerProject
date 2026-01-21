@@ -1,3 +1,5 @@
+#include <sys/eventfd.h>
+
 #include "common.h"
 #include "net.h"
 #include "protocol.h"
@@ -6,27 +8,54 @@
 
 static int listen_fd = -1;
 static int epfd = -1;
+static int wake_fd = -1;
 
 static connection_t* connections[MAX_CLIENTS];
 
-extern job_queue_t g_job_queue;
+extern job_queue_t g_io_q;
+extern job_queue_t g_logic_q;
+
+void net_wakeup(void) {
+	if (wake_fd < 0) return;
+
+	uint64_t one = 1;
+
+	for (;;) {
+		ssize_t rc = write(wake_fd, &one, sizeof(one));
+		if (rc == (ssize_t)sizeof(one)) {
+			return;                 // 정상
+		}
+		if (rc < 0) {
+			if (errno == EINTR) continue;  // 시그널로 끊김 -> 재시도
+			if (errno == EAGAIN) return;   // 논블록 + 카운터 포화 -> 깨우기 실패해도 치명적 아님
+			return;                         // 필요하면 perror/log
+		}
+		return; // (이론상) 부분 write 방어
+	}
+}
 
 static void close_connection(int fd)
 {
 	connection_t* conn = connections[fd];
 	if (!conn) return;
 
-	session_t* s = session_get_or_create(fd);
-	if (s && s->room_id >= 0)
-		room_leave(s);
-
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-	session_remove(fd);
 	close(fd);
 	free(conn);
 	connections[fd] = NULL;
 
 	printf("[INFO] Connection closed fd=%d\n", fd);
+}
+
+static void net_disconnect(int fd)
+{
+	if (fd < 0 || fd >= MAX_CLIENTS) return;
+
+	// 네트워크 리소스 정리
+	if (connections[fd]) close_connection(fd);
+
+	// 상태 정리는 워커에게 맡김
+	job_queue_push_disconnect(&g_logic_q, fd);
 }
 
 static int set_nonblocking(int fd) {
@@ -92,7 +121,7 @@ static void handle_send_job(job_t* job)
 		return;
 
 	if (packet_send(fd, &job->packet) < 0) {
-		job_queue_push_disconnect(&g_job_queue, fd);
+		net_disconnect(fd);
 	}
 }
 
@@ -134,6 +163,24 @@ int net_init() {
 		return -1;
 	}
 
+	wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (wake_fd < 0) {
+		perror("eventfd error");
+		return -1;
+	}
+
+	struct epoll_event wev;
+	memset(&wev, 0, sizeof(wev));
+	wev.events = EPOLLIN;
+	wev.data.fd = wake_fd;
+
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd, &wev) < 0) {
+		perror("epoll_ctl add wake_fd error");
+		close(wake_fd);
+		wake_fd = -1;
+		return -1;
+	}
+
 	struct epoll_event ev;
 	ev.events = EPOLLIN;
 	ev.data.fd = listen_fd;
@@ -152,18 +199,22 @@ void net_run() {
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
+			perror("epoll wait error");
+			break;
 		}
-		perror("epoll wait error");
-		break;
+
+		for (int i = 0; i < n; ++i) {
+			if (events[i].data.fd == wake_fd && (events[i].events & EPOLLIN)) {
+				uint64_t v;
+				while (read(wake_fd, &v, sizeof(v)) > 0) {}
+				break;
+			}
+		}
 
 		job_t job;
-		while (job_queue_pop(&g_job_queue, &job, JOBQ_NONBLOCK)) {
+		while (job_queue_pop(&g_io_q, &job, JOBQ_NONBLOCK)) {
 			if (job.type == JOB_SEND) {
 				handle_send_job(&job);
-			}
-			else {
-				// JOB_PACKET / DISCONNECT는 다시 worker로
-				job_queue_push(&g_job_queue, &job);
 			}
 		}
 
@@ -171,9 +222,18 @@ void net_run() {
 			int fd = events[i].data.fd;
 			uint32_t ev = events[i].events;
 
+			if (fd == wake_fd) {
+				// 위에서 이미 드레인 했더라도, 혹시 남았으면 한 번 더 비움
+				if (ev & EPOLLIN) {
+					uint64_t v;
+					while (read(wake_fd, &v, sizeof(v)) > 0) {}
+				}
+				continue;
+			}
+
 			// 에러와 끊김 처리
 			if (ev & (EPOLLERR | EPOLLHUP)) {
-				job_queue_push_disconnect(&g_job_queue, fd);
+				net_disconnect(fd);
 				continue;
 			}
 
@@ -232,7 +292,7 @@ void net_run() {
 				bool connection_closed = false;
 
 				while (1) {
-					ssize_t n = recv(fd, conn->recv_buf + conn->recv_len, RECV_BUF_SIZE - conn->recv_len, 0);
+					ssize_t n = recv(cfd, conn->recv_buf + conn->recv_len, RECV_BUF_SIZE - conn->recv_len, 0);
 
 					if (n > 0) {
 						conn->recv_len += n;
@@ -246,25 +306,23 @@ void net_run() {
 							if (r < 0) {
 								/* protocol error */
 								printf("[ERROR] protocol violation fd=%d\n", cfd);
-								close_connection(cfd);
+								net_disconnect(cfd);
 								connection_closed = true;
 								break;
 							}
 							if (connection_closed)
 								break;
 
-							job_t job = { 0 };
 							job.fd = cfd;
 							job.packet = pkt;
-
-							job_queue_push(&g_job_queue, &job);
+							job_queue_push_packet(&g_logic_q, cfd, &pkt);
 
 							printf("[PACKET] fd=%d type=%d len=%d\n", cfd, pkt.type, pkt.length);
 						}
 					}
 					else if (n == 0) {
 						// 정상 종료
-						job_queue_push_disconnect(&g_job_queue, fd);
+						net_disconnect(cfd);
 						break;
 					}
 					else {
@@ -272,7 +330,7 @@ void net_run() {
 							break;
 						}
 						else {
-							job_queue_push_disconnect(&g_job_queue, fd);
+							net_disconnect(cfd);
 							break;
 						}
 					}
@@ -299,7 +357,7 @@ void net_run() {
 					else if (n < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
-						job_queue_push_disconnect(&g_job_queue, fd);
+						net_disconnect(fd);
 						break;
 					}
 				}

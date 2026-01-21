@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
@@ -22,13 +23,13 @@
 
 #define PORTNUM 3800
 #define MAX_EVENTS 64
-#define MAX_CLIENTS 512
+#define MAX_CLIENTS 4096
 
 #define RECV_BUF_SIZE 4096
 #define SEND_BUF_SIZE 4096
 #define MAX_PACKET_SIZE 1024
 
-#define MAX_ROOM_USER 8
+#define MAX_ROOM_USER 4
 #define MAX_ROOMS 256
 
 #define WORKER_THREAD_NUM 4
