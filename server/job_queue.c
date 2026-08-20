@@ -1,83 +1,83 @@
 #include "job_queue.h"
 
 /*
-* ½º·¹µå °£ ÀÛ¾÷(job_t) Àü´ÞÀ» À§ÇÑ °íÁ¤ Å©±âÀÇ circular queue
-* producer / consumer ÆÐÅÏÀ¸·Î ±¸Çö
-* producer: job_queue_push()·Î ÀÛ¾÷À» ³ÖÀ½
-* consumer: job_queue_pop()À¸·Î ÀÛ¾÷À» ²¨³¿
+* ìŠ¤ë ˆë“œ ê°„ ìž‘ì—…(job_t) ì „ë‹¬ì„ ìœ„í•œ ê³ ì • í¬ê¸°ì˜ circular queue
+* producer / consumer íŒ¨í„´ìœ¼ë¡œ êµ¬í˜„
+* producer: job_queue_push()ë¡œ ìž‘ì—…ì„ ë„£ìŒ
+* consumer: job_queue_pop()ìœ¼ë¡œ ìž‘ì—…ì„ êº¼ëƒ„
 */
 
-/* Å¥ ÃÊ±âÈ­ ÇÔ¼ö */
+/* í ì´ˆê¸°í™” í•¨ìˆ˜ */
 void job_queue_init(job_queue_t* q) {
 	q->head = q->tail = q->count = 0;
 	pthread_mutex_init(&q->mutex, NULL);
 	pthread_cond_init(&q->cond, NULL);
 }
 
-/* job ÇÏ³ª¸¦ pushÇÏ´Â ÇÔ¼ö */
+/* job í•˜ë‚˜ë¥¼ pushí•˜ëŠ” í•¨ìˆ˜ */
 void job_queue_push(job_queue_t *q, job_t* job) {
-	
-	/* ¿¬»êÀº mutex·Î º¸È£µÊ */
+
+	/* ì—°ì‚°ì€ mutexë¡œ ë³´í˜¸ë¨ */
 	pthread_mutex_lock(&q->mutex);
 
-	/* Å¥°¡ °¡µæ Â÷¸é °ø°£ÀÌ »ý±æ ¶§±îÁö ´ë±â */
-	while(q->count == JOB_QUEUE_SIZE) 
+	/* íê°€ ê°€ë“ ì°¨ë©´ ê³µê°„ì´ ìƒê¸¸ ë•Œê¹Œì§€ ëŒ€ê¸° */
+	while(q->count == JOB_QUEUE_SIZE)
 		pthread_cond_wait(&q->cond, &q->mutex);
 
-	/* push ÁøÇà, circular queueÀÌ¹Ç·Î moular ¿¬»êÀ¸·Î push°¡ ÁøÇàµÊ*/
+	/* push ì§„í–‰, circular queueì´ë¯€ë¡œ moular ì—°ì‚°ìœ¼ë¡œ pushê°€ ì§„í–‰ë¨*/
 	q->jobs[q->tail] = *job;
 	q->tail = (q->tail + 1) % JOB_QUEUE_SIZE;
 	q->count++;
 
-	/* consumer°¡ ´ë±â ÁßÀÏ ¼ö ÀÖÀ¸¹Ç·Î ±ú¿ò */
+	/* consumerê°€ ëŒ€ê¸° ì¤‘ì¼ ìˆ˜ ìžˆìœ¼ë¯€ë¡œ ê¹¨ì›€ */
 	pthread_cond_signal(&q->cond);
 	pthread_mutex_unlock(&q->mutex);
 }
 
-/* job ÇÏ³ª¸¦ popÇÏ´Â ÇÔ¼ö */
+/* job í•˜ë‚˜ë¥¼ popí•˜ëŠ” í•¨ìˆ˜ */
 int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode) {
-	
-	/* ¿¬»êÀº mutex·Î º¸È£µÊ */
+
+	/* ì—°ì‚°ì€ mutexë¡œ ë³´í˜¸ë¨ */
 	pthread_mutex_lock(&q->mutex);
 
-	/* Å¥°¡ ºñ¾îÀÖÀ¸¸é mode¿¡ µû¶ó BLOCK ¶Ç´Â Áï½Ã ¹ÝÈ¯ */
+	/* íê°€ ë¹„ì–´ìžˆìœ¼ë©´ modeì— ë”°ë¼ BLOCK ë˜ëŠ” ì¦‰ì‹œ ë°˜í™˜ */
 	while (q->count == 0) {
 		if (mode == JOBQ_NONBLOCK) {
 			pthread_mutex_unlock(&q->mutex);
-			return 0;   
+			return 0;
 		}
 		pthread_cond_wait(&q->cond, &q->mutex);
 	}
 
-	/* pop ÁøÇà, circular queueÀÌ¹Ç·Î moular ¿¬»êÀ¸·Î popÀÌ ÁøÇàµÊ*/
+	/* pop ì§„í–‰, circular queueì´ë¯€ë¡œ moular ì—°ì‚°ìœ¼ë¡œ popì´ ì§„í–‰ë¨*/
 	*out = q->jobs[q->head];
 	q->head = (q->head + 1) % JOB_QUEUE_SIZE;
 	q->count--;
 
-	/* producer°¡ °¡µæ Â÷ ÀÖ¾î ´ë±â ÁßÀÏ ¼ö ÀÖÀ¸¹Ç·Î ±ú¿ò */
-	pthread_cond_signal(&q->cond);1
+	/* producerê°€ ê°€ë“ ì°¨ ìžˆì–´ ëŒ€ê¸° ì¤‘ì¼ ìˆ˜ ìžˆìœ¼ë¯€ë¡œ ê¹¨ì›€ */
+	pthread_cond_signal(&q->cond);
 	pthread_mutex_unlock(&q->mutex);
 
 	return 1;
 }
 
-/* ======================= ÀÌÇÏ helper ÇÔ¼ö ======================= */
-/* job Å¸ÀÔº°·Î ÇÊ¼ö ÇÊµå°¡ ´Ù¸£¹Ç·Î, »ý¼º ±ÔÄ¢À» ÇÑ °÷¿¡ ¸ðÀ½ */
-/* ¶ÇÇÑ, job_tÀÇ ³»ºÎ ±¸Á¶°¡ ¹Ù²î¾îµµ(ÇÊµå Ãß°¡/ÃÊ±âÈ­ ±ÔÄ¢ º¯°æ) helper¸¸ ¼öÁ¤ÇÏ¸é µÊ */
+/* ======================= ì´í•˜ helper í•¨ìˆ˜ ======================= */
+/* job íƒ€ìž…ë³„ë¡œ í•„ìˆ˜ í•„ë“œê°€ ë‹¤ë¥´ë¯€ë¡œ, ìƒì„± ê·œì¹™ì„ í•œ ê³³ì— ëª¨ìŒ */
+/* ë˜í•œ, job_tì˜ ë‚´ë¶€ êµ¬ì¡°ê°€ ë°”ë€Œì–´ë„(í•„ë“œ ì¶”ê°€/ì´ˆê¸°í™” ê·œì¹™ ë³€ê²½) helperë§Œ ìˆ˜ì •í•˜ë©´ ë¨ */
 
-/* ÆÐÅ¶ ¼ö½Å ÀÌº¥Æ®¸¦ job ÇüÅÂ(JOB_PACKET)·Î ¸¸µé¾î Å¥¿¡ »ðÀÔ */
+/* íŒ¨í‚· ìˆ˜ì‹  ì´ë²¤íŠ¸ë¥¼ job í˜•íƒœ(JOB_PACKET)ë¡œ ë§Œë“¤ì–´ íì— ì‚½ìž… */
 void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt) {
 	job_t job = {.type = JOB_PACKET, .fd = fd, .packet = *pkt };
 	job_queue_push(q, &job);
 }
 
-/* ¿¬°á Á¾·á ÀÌº¥Æ®¸¦ job ÇüÅÂ(JOB_DISCONNECT)·Î ¸¸µé¾î Å¥¿¡ »ðÀÔ */
+/* ì—°ê²° ì¢…ë£Œ ì´ë²¤íŠ¸ë¥¼ job í˜•íƒœ(JOB_DISCONNECT)ë¡œ ë§Œë“¤ì–´ íì— ì‚½ìž… */
 void job_queue_push_disconnect(job_queue_t* q, int fd) {
 	job_t job = { .type = JOB_DISCONNECT,.fd = fd };
 	job_queue_push(q, &job);
 }
 
-/* ¼­¹ö Á¾·á ¿äÃ»À» job ÇüÅÂ(JOB_SHUTDOWN)·Î ¸¸µé¾î Å¥¿¡ »ðÀÔ */
+/* ì„œë²„ ì¢…ë£Œ ìš”ì²­ì„ job í˜•íƒœ(JOB_SHUTDOWN)ë¡œ ë§Œë“¤ì–´ íì— ì‚½ìž… */
 void job_queue_push_shutdown(job_queue_t* q) {
 	job_t job = { .type = JOB_SHUTDOWN };
 	job_queue_push(q, &job);

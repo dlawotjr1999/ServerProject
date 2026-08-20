@@ -3,7 +3,7 @@
 
 #include "common.h"
 
-// ¼¼¼Ç Á¤º¸ ±¸Á¶Ã¼
+// ì„¸ì…˜ ì •ë³´ êµ¬ì¡°ì²´
 typedef struct session {
 	int session_id;
 	int fd;
@@ -15,7 +15,7 @@ typedef struct session {
 	size_t size_offset;
 } session_t;
 
-// ¹æ Á¤º¸ ±¸Á¶Ã¼
+// ë°© ì •ë³´ êµ¬ì¡°ì²´
 typedef struct room {
 	int room_id;
 	session_t* users[MAX_ROOM_USER];
@@ -24,8 +24,8 @@ typedef struct room {
 } room_t;
 
 /* session API */
-session_t* session_get(int fd);       // Á¶È¸¸¸ (»ı¼º X)
-session_t* session_create(int fd);    // »ı¼º¸¸ (¾øÀ» ¶§¸¸ »ı¼º)
+session_t* session_get(int fd);       // ì¡°íšŒë§Œ (ìƒì„± X)
+session_t* session_create(int fd);    // ìƒì„±ë§Œ (ì—†ì„ ë•Œë§Œ ìƒì„±)
 void session_remove(int fd);
 
 /* room API */

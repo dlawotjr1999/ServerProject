@@ -5,31 +5,31 @@
 
 extern job_queue_t g_logic_q;
 
-/* ÇÏ³ªÀÇ ÆĞÅ¶¿¡ ´ëÇØ, ÆĞÅ¶ Å¸ÀÔº° ·ÎÁ÷À» ¼öÇàÇÏ´Â ÇÔ¼ö */
+/* í•˜ë‚˜ì˜ íŒ¨í‚·ì— ëŒ€í•´, íŒ¨í‚· íƒ€ì…ë³„ ë¡œì§ì„ ìˆ˜í–‰í•˜ëŠ” í•¨ìˆ˜ */
 static void handle_packet(session_t* s, packet_t* pkt);
 
-/* fd ¿¬°á Á¾·á Ã³¸® ÇÔ¼ö */
+/* fd ì—°ê²° ì¢…ë£Œ ì²˜ë¦¬ í•¨ìˆ˜ */
 static void handle_disconnect(int fd);
 
-/* ¼­¹ö Á¤»ó Á¾·á ½Ã ÀüÃ¼ ¼¼¼Ç ¹× ¹æ Á¤¸® ÇÔ¼ö */
+/* ì„œë²„ ì •ìƒ ì¢…ë£Œ ì‹œ ì „ì²´ ì„¸ì…˜ ë° ë°© ì •ë¦¬ í•¨ìˆ˜ */
 static void handle_shutdown(void);
 
-/* ·ÎÁ÷ ½º·¹µå ¸ŞÀÎ ·çÇÁ */
+/* ë¡œì§ ìŠ¤ë ˆë“œ ë©”ì¸ ë£¨í”„ */
 void* worker_thread(void* arg)
 {
 	(void)arg;
 	job_t job;
 
 	while (1) {
-		/* Å¥¿¡ ÀÛ¾÷ÀÌ µé¾î¿Ã ¶§±îÁö ´ë±â */
+		/* íì— ì‘ì—…ì´ ë“¤ì–´ì˜¬ ë•Œê¹Œì§€ ëŒ€ê¸° */
 		job_queue_pop(&g_logic_q, &job, JOBQ_BLOCK);
 
 		switch (job.type) {
 
 		/*
-		* ³×Æ®¿öÅ© ÀÌº¥Æ®·ÎºÎÅÍ ¿Â ÆĞÅ¶ Ã³¸®
-		* fd -> session ¸ÅÇÎ È®º¸
-		* ¸¸¾à sessionÀÌ ¾øÀ¸¸é »õ·Î »ı¼ºÇÔ
+		* ë„¤íŠ¸ì›Œí¬ ì´ë²¤íŠ¸ë¡œë¶€í„° ì˜¨ íŒ¨í‚· ì²˜ë¦¬
+		* fd -> session ë§¤í•‘ í™•ë³´
+		* ë§Œì•½ sessionì´ ì—†ìœ¼ë©´ ìƒˆë¡œ ìƒì„±í•¨
 		*/
 		case JOB_PACKET: {
 			session_t* s = session_get(job.fd);
@@ -40,7 +40,7 @@ void* worker_thread(void* arg)
 				break;
 			}
 
-			/* ÆĞÅ¶ Å¸ÀÔº° ³í¸® Ã³¸® */
+			/* íŒ¨í‚· íƒ€ì…ë³„ ë…¼ë¦¬ ì²˜ë¦¬ */
 			handle_packet(s, &job.packet);
 
 			printf("[WORKER] sid=%d fd=%d type=%d len=%d\n", s->session_id, job.fd, job.packet.type, job.packet.length);
@@ -48,8 +48,8 @@ void* worker_thread(void* arg)
 		}
 
 		/*
-		* ¿¬°á Á¾·á Ã³¸®
-		* net thread¿¡¼­ epoll/err µîÀ¸·Î disconnect¸¦ °¨ÁöÇÏ¸é ·ÎÁ÷ Å¥¿¡ JOB_DISCONNECT »ğÀÔ
+		* ì—°ê²° ì¢…ë£Œ ì²˜ë¦¬
+		* net threadì—ì„œ epoll/err ë“±ìœ¼ë¡œ disconnectë¥¼ ê°ì§€í•˜ë©´ ë¡œì§ íì— JOB_DISCONNECT ì‚½ì…
 		*/
 		case JOB_DISCONNECT: {
 			handle_disconnect(job.fd);
@@ -57,9 +57,9 @@ void* worker_thread(void* arg)
 		}
 
 		/*
-		* Á¤»ó Á¾·á Ã³¸®
-		* ¸ğµç ¼¼¼ÇÀ» ¼øÈ¸ÇÏ¸ç ¹æ¿¡¼­ Á¦°Å ÈÄ ¼¼¼Ç Á¤¸®
-		* Á¤¸® ¿Ï·á ÈÄ worker thread Á¾·á
+		* ì •ìƒ ì¢…ë£Œ ì²˜ë¦¬
+		* ëª¨ë“  ì„¸ì…˜ì„ ìˆœíšŒí•˜ë©° ë°©ì—ì„œ ì œê±° í›„ ì„¸ì…˜ ì •ë¦¬
+		* ì •ë¦¬ ì™„ë£Œ í›„ worker thread ì¢…ë£Œ
 		*/
 		case JOB_SHUTDOWN: {
 			handle_shutdown();
@@ -80,10 +80,10 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 
 	switch (pkt->type) {
 
-	/* ¹æ ÀÔÀå
-	* ÀÌ¹Ì ¹æ¿¡ µé¾î°¡ ÀÖ´Â °æ¿ì Áßº¹ ¹æÁö
-	* Âü°¡ °¡´ÉÇÑ ¹æÀ» Å½»ö ÈÄ, ¹æÀÌ Á¸ÀçÇÏÁö ¾ÊÀ¸¸é ¹æ »ı¼º
-	* ÀÌÈÄ ÇöÀç ¼¼¼ÇÀ¸·Î ¹æ¿¡ Âü°¡
+	/* ë°© ì…ì¥
+	* ì´ë¯¸ ë°©ì— ë“¤ì–´ê°€ ìˆëŠ” ê²½ìš° ì¤‘ë³µ ë°©ì§€
+	* ì°¸ê°€ ê°€ëŠ¥í•œ ë°©ì„ íƒìƒ‰ í›„, ë°©ì´ ì¡´ì¬í•˜ì§€ ì•Šìœ¼ë©´ ë°© ìƒì„±
+	* ì´í›„ í˜„ì¬ ì„¸ì…˜ìœ¼ë¡œ ë°©ì— ì°¸ê°€
 	*/
 	case PKT_JOIN_ROOM: {
 		if (s->room_id >= 0)
@@ -95,10 +95,10 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		break;
 	}
 
-	/* Ã¤ÆÃ ¸Ş½ÃÁö Ã³¸®
-	* ¹æ ¹ÌÀÔÀå ½ÃÀÇ Ã¤ÆÃÀº ¹«½Ã
-	* ¼¼¼ÇÀÇ room_id¸¦ ÅëÇØ ¹æÀÇ Á¤º¸¸¦ °¡Á®¿È
-	* ºê·ÎµåÄ³½ºÆÃÀ» ÅëÇØ °°Àº ¹æÀÇ ¼¼¼Çµé¿¡ Ã¤ÆÃ ÀüÆÄ
+	/* ì±„íŒ… ë©”ì‹œì§€ ì²˜ë¦¬
+	* ë°© ë¯¸ì…ì¥ ì‹œì˜ ì±„íŒ…ì€ ë¬´ì‹œ
+	* ì„¸ì…˜ì˜ room_idë¥¼ í†µí•´ ë°©ì˜ ì •ë³´ë¥¼ ê°€ì ¸ì˜´
+	* ë¸Œë¡œë“œìºìŠ¤íŒ…ì„ í†µí•´ ê°™ì€ ë°©ì˜ ì„¸ì…˜ë“¤ì— ì±„íŒ… ì „íŒŒ
 	*/
 	case PKT_CHAT: {
 		if (s->room_id < 0)
@@ -112,8 +112,8 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 	}
 
 	/*
-	* ¹æ ÅğÀå
-	* room_leave ÇÔ¼ö¸¦ ÅëÇØ ¼¼¼ÇÀÇ room_id °»½Å ¹× ¹æ ¸ñ·Ï Á¤¸®¸¦ ¼öÇà
+	* ë°© í‡´ì¥
+	* room_leave í•¨ìˆ˜ë¥¼ í†µí•´ ì„¸ì…˜ì˜ room_id ê°±ì‹  ë° ë°© ëª©ë¡ ì •ë¦¬ë¥¼ ìˆ˜í–‰
 	*/
 	case PKT_LEAVE_ROOM: {
 		if (s->room_id < 0)
@@ -131,19 +131,19 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 static void handle_disconnect(int fd) {
 	session_t* s = session_get(fd);
 
-	/* ÀÌ¹Ì Á¤¸®µÆ°Å³ª, ¼¼¼Ç »ı¼º Àü ²÷±ä °æ¿ì */
+	/* ì´ë¯¸ ì •ë¦¬ëê±°ë‚˜, ì„¸ì…˜ ìƒì„± ì „ ëŠê¸´ ê²½ìš° */
 	if (!s) {
 		return;
 	}
 
 	printf("[LOGIC] fd=%d disconnect event\n", fd);
 
-	/* ¹æ¿¡ µé¾î°¡ ÀÖ¾ú´Ù¸é ¹æ¿¡¼­ Á¦°Å */
+	/* ë°©ì— ë“¤ì–´ê°€ ìˆì—ˆë‹¤ë©´ ë°©ì—ì„œ ì œê±° */
 	if (s->room_id >= 0) {
 		room_leave(s);
 	}
 
-	/* ¼¼¼Ç Á¦°Å */
+	/* ì„¸ì…˜ ì œê±° */
 	session_remove(fd);
 }
 
@@ -152,8 +152,8 @@ static void handle_shutdown(void)
 	printf("[LOGIC] graceful shutdown started\n");
 
 	/*
-	* fd ¼øÈ¸¸¦ ÅëÇØ Á¸ÀçÇÏ´Â ¼¼¼ÇÀ» Ã£¾Æ Á¦°ÅÇÔ
-	* ¹æ¿¡ Á¸ÀçÇÏ´Â ¼¼¼ÇµéÀº ¸ÕÀú room_leave Ã³¸® ÈÄ ¼¼¼Ç Á¦°Å
+	* fd ìˆœíšŒë¥¼ í†µí•´ ì¡´ì¬í•˜ëŠ” ì„¸ì…˜ì„ ì°¾ì•„ ì œê±°í•¨
+	* ë°©ì— ì¡´ì¬í•˜ëŠ” ì„¸ì…˜ë“¤ì€ ë¨¼ì € room_leave ì²˜ë¦¬ í›„ ì„¸ì…˜ ì œê±°
 	*/
 	for (int fd = 0; fd < MAX_CLIENTS; ++fd) {
 		session_t* s = session_get(fd);

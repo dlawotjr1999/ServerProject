@@ -10,52 +10,52 @@ static int listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
 
-/* fd -> connection °´Ã¼ ¸ÅÇÎ Å×ÀÌºí */
+/* fd -> connection ê°ì²´ ë§¤í•‘ í…Œì´ë¸” */
 static connection_t* connections[MAX_CLIENTS];
 
 extern job_queue_t g_io_q;
 extern job_queue_t g_logic_q;
 
-/* epoll_wait·Î ´ë±â ÁßÀÎ ³×Æ®¿öÅ© ½º·¹µå¸¦ ±ú¿ì´Â ÇÔ¼ö */
+/* epoll_waitë¡œ ëŒ€ê¸° ì¤‘ì¸ ë„¤íŠ¸ì›Œí¬ ìŠ¤ë ˆë“œë¥¼ ê¹¨ìš°ëŠ” í•¨ìˆ˜ */
 void net_wakeup(void) {
 	if (wake_fd < 0) return;
 
 	uint64_t one = 1;
 
 	for (;;) {
-		/* eventfd´Â 8¹ÙÀÌÆ® Á¤¼ö ¾²±â¸¦ ¿ä±¸ÇÏ¸ç, ¼º°øÇÏ¸é epoll_wait°¡ Áï½Ã ±ú¾î³² */
+		/* eventfdëŠ” 8ë°”ì´íŠ¸ ì •ìˆ˜ ì“°ê¸°ë¥¼ ìš”êµ¬í•˜ë©°, ì„±ê³µí•˜ë©´ epoll_waitê°€ ì¦‰ì‹œ ê¹¨ì–´ë‚¨ */
 		ssize_t rc = write(wake_fd, &one, sizeof(one));
 		
-		/* Á¤»óÀûÀ¸·Î ±ú¿ì´Â °æ¿ì */
+		/* ì •ìƒì ìœ¼ë¡œ ê¹¨ìš°ëŠ” ê²½ìš° */
 		if (rc == (ssize_t)sizeof(one)) {
 			return;                 
 		}
 		if (rc < 0) {
 			/* 
-			* ½Ã±×³Î·Î ²÷±è -> Àç½Ãµµ
-			* non-block + Ä«¿îÅÍ Æ÷È­ -> ±ú¿ì±â ½ÇÆĞÇØµµ Ä¡¸íÀû ¾Æ´Ô
-			* ±âÅ¸ ¿À·ù´Â Á¶¿ëÈ÷ Á¾·á
+			* ì‹œê·¸ë„ë¡œ ëŠê¹€ -> ì¬ì‹œë„
+			* non-block + ì¹´ìš´í„° í¬í™” -> ê¹¨ìš°ê¸° ì‹¤íŒ¨í•´ë„ ì¹˜ëª…ì  ì•„ë‹˜
+			* ê¸°íƒ€ ì˜¤ë¥˜ëŠ” ì¡°ìš©íˆ ì¢…ë£Œ
 			*/  
 			if (errno == EINTR) continue; 
 			if (errno == EAGAIN) return;   
 			return;                    
 		}
 
-		/* ºÎºĞ write ¹æ¾î */
+		/* ë¶€ë¶„ write ë°©ì–´ */
 		return; 
 	}
 }
 
-/* fd¿¡ ´ëÀÀÇÏ´Â ³×Æ®¿öÅ© ¿¬°áÀ» ¿ÏÀüÈ÷ Á¾·áÇÏ´Â ÇÔ¼ö */
+/* fdì— ëŒ€ì‘í•˜ëŠ” ë„¤íŠ¸ì›Œí¬ ì—°ê²°ì„ ì™„ì „íˆ ì¢…ë£Œí•˜ëŠ” í•¨ìˆ˜ */
 static void close_connection(int fd)
 {
 	connection_t* conn = connections[fd];
 	if (!conn) return;
 
 	/*
-	* epoll °¨½Ã ´ë»ó Á¦°Å
-	* ¼ÒÄÏ Á¾·á ÈÄ connection ±¸Á¶Ã¼ ¸Ş¸ğ¸® ÇØÁ¦
-	* ¸¶Áö¸·À¸·Î ¿¬°á Å×ÀÌºí¿¡¼­ Á¦°Å
+	* epoll ê°ì‹œ ëŒ€ìƒ ì œê±°
+	* ì†Œì¼“ ì¢…ë£Œ í›„ connection êµ¬ì¡°ì²´ ë©”ëª¨ë¦¬ í•´ì œ
+	* ë§ˆì§€ë§‰ìœ¼ë¡œ ì—°ê²° í…Œì´ë¸”ì—ì„œ ì œê±°
 	*/
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
 	close(fd);
@@ -66,21 +66,21 @@ static void close_connection(int fd)
 }
 
 /*
-* ³×Æ®¿öÅ© ¿¬°á Á¾·á Ã³¸® ÇÔ¼ö
-* ³×Æ®¿öÅ© ¸®¼Ò½º Á¤¸® ÈÄ, ³í¸®Àû »óÅÂ Á¤¸®´Â ¿öÄ¿ ½º·¹µå¿¡ À§ÀÓ
+* ë„¤íŠ¸ì›Œí¬ ì—°ê²° ì¢…ë£Œ ì²˜ë¦¬ í•¨ìˆ˜
+* ë„¤íŠ¸ì›Œí¬ ë¦¬ì†ŒìŠ¤ ì •ë¦¬ í›„, ë…¼ë¦¬ì  ìƒíƒœ ì •ë¦¬ëŠ” ì›Œì»¤ ìŠ¤ë ˆë“œì— ìœ„ì„
 */
 static void net_disconnect(int fd)
 {
 	if (fd < 0 || fd >= MAX_CLIENTS) return;
 
-	/* ³×Æ®¿öÅ© ¸®¼Ò½º Á¤¸® */
+	/* ë„¤íŠ¸ì›Œí¬ ë¦¬ì†ŒìŠ¤ ì •ë¦¬ */
 	if (connections[fd]) close_connection(fd);
 
-	/* ¼¼¼Ç / ·ë »óÅÂ Á¤¸®´Â ·ÎÁ÷ ½º·¹µå¿¡¼­ Ã³¸®ÇÏµµ·Ï DISCONNECT ÀÛ¾÷À» Å¥¿¡ Àü´Ş */
+	/* ì„¸ì…˜ / ë£¸ ìƒíƒœ ì •ë¦¬ëŠ” ë¡œì§ ìŠ¤ë ˆë“œì—ì„œ ì²˜ë¦¬í•˜ë„ë¡ DISCONNECT ì‘ì—…ì„ íì— ì „ë‹¬ */
 	job_queue_push_disconnect(&g_logic_q, fd);
 }
 
-/* ¼ÒÄÏÀ» nonblocking ¸ğµå·Î ¼³Á¤ÇÏ´Â ÇÔ¼ö */
+/* ì†Œì¼“ì„ nonblocking ëª¨ë“œë¡œ ì„¤ì •í•˜ëŠ” í•¨ìˆ˜ */
 static int set_nonblocking(int fd) {
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags < 0)
@@ -89,15 +89,15 @@ static int set_nonblocking(int fd) {
 }
 
 /*
-* ÆĞÅ¶À» connectionÀÇ send ¹öÆÛ¿¡ Á÷·ÄÈ­ÇÏ¿© ÀûÀçÇÏ´Â ÇÔ¼ö
-* ½ÇÁ¦ send´Â epollÀÇ EPOLLOUT ÀÌº¥Æ®¿¡¼­ ¼öÇàµÊ
+* íŒ¨í‚·ì„ connectionì˜ send ë²„í¼ì— ì§ë ¬í™”í•˜ì—¬ ì ì¬í•˜ëŠ” í•¨ìˆ˜
+* ì‹¤ì œ sendëŠ” epollì˜ EPOLLOUT ì´ë²¤íŠ¸ì—ì„œ ìˆ˜í–‰ë¨
 */
 int packet_send(int fd, packet_t* pkt) {
 	connection_t* conn = connections[fd];
 	if (!conn)
 		return -1;
 
-	/* pkt->length´Â (type + payload) ±æÀÌ */
+	/* pkt->lengthëŠ” (type + payload) ê¸¸ì´ */
 	if (pkt->length < 2 || pkt->length > MAX_PACKET_SIZE + 2)
 		return -1;
 
@@ -111,11 +111,11 @@ int packet_send(int fd, packet_t* pkt) {
 	if (conn->send_len + total_len > SEND_BUF_SIZE)
 		return -1;
 
-	/* ¾ÈÀüÇÑ Á÷·ÄÈ­ ½ÃÀÛ */
+	/* ì•ˆì „í•œ ì§ë ¬í™” ì‹œì‘ */
 	uint16_t net_len = htons(pkt->length);
 	uint16_t net_type = htons(pkt->type);
 
-	/* send ¹öÆÛ¿¡ µ¥ÀÌÅÍ º¹»ç ÈÄ send ¹öÆÛ ±æÀÌ °»½Å */
+	/* send ë²„í¼ì— ë°ì´í„° ë³µì‚¬ í›„ send ë²„í¼ ê¸¸ì´ ê°±ì‹  */
 	memcpy(conn->send_buf + conn->send_len, &net_len, 2);
 	memcpy(conn->send_buf + conn->send_len + 2, &net_type, 2);
 	if (payload_len > 0) {
@@ -123,7 +123,7 @@ int packet_send(int fd, packet_t* pkt) {
 	}
 	conn->send_len += total_len;
 
-	/* EPOLLOUTÀ» È°¼ºÈ­ÇÏ¿© Àü¼Û Æ®¸®°Å */
+	/* EPOLLOUTì„ í™œì„±í™”í•˜ì—¬ ì „ì†¡ íŠ¸ë¦¬ê±° */
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLOUT;
 	ev.data.fd = fd;
@@ -132,66 +132,68 @@ int packet_send(int fd, packet_t* pkt) {
 	return 0;
 }
 
-/* IO Å¥¿¡¼­ Àü´ŞµÈ SEND ÀÛ¾÷À» Ã³¸®ÇÏ´Â ÇÔ¼ö */
+/* IO íì—ì„œ ì „ë‹¬ëœ SEND ì‘ì—…ì„ ì²˜ë¦¬í•˜ëŠ” í•¨ìˆ˜ */
 static void handle_send_job(job_t* job)
 {
 	int fd = job->fd;
 	connection_t* conn = connections[fd];
 
-	/* ÀÌ¹Ì ²÷±ä ¿¬°áÀÇ °æ¿ì Á¶¿ëÈ÷ ¹«½Ã */
+	/* ì´ë¯¸ ëŠê¸´ ì—°ê²°ì˜ ê²½ìš° ì¡°ìš©íˆ ë¬´ì‹œ */
 	if (!conn)
 		return;
 
-	/* ÆĞÅ¶ ÀûÀç ½ÇÆĞ ½Ã ¿¬°á Á¾·á */
+	/* íŒ¨í‚· ì ì¬ ì‹¤íŒ¨ ì‹œ ì—°ê²° ì¢…ë£Œ */
 	if (packet_send(fd, &job->packet) < 0) {
 		net_disconnect(fd);
 	}
 }
 
-/* 
-* ³×Æ®¿öÅ© ¼­¹ö ÃÊ±âÈ­ ÇÔ¼ö
-* ¸®½º´× ¼ÒÄÏ »ı¼º -> ÀÎ½ºÅÏ½º »ı¼º -> eventfd ±â¹İ wakeup ¸ŞÄ¿´ÏÁò µî·Ï
+/*
+* ë„¤íŠ¸ì›Œí¬ ì„œë²„ ì´ˆê¸°í™” í•¨ìˆ˜
+* ë¦¬ìŠ¤ë‹ ì†Œì¼“ ìƒì„± -> ì¸ìŠ¤í„´ìŠ¤ ìƒì„± -> eventfd ê¸°ë°˜ wakeup ë©”ì»¤ë‹ˆì¦˜ ë“±ë¡
+*
+* ë°˜í™˜ê°’: ì„±ê³µ 0, ì‹¤íŒ¨ -1ë¡œ í†µì¼ (í˜¸ì¶œë¶€ì¸ main.cê°€ `< 0`ìœ¼ë¡œë§Œ ê²€ì‚¬í•˜ë¯€ë¡œ ëª¨ë“  ì‹¤íŒ¨ ê²½ë¡œê°€ ì´ë¥¼ ì§€ì¼œì•¼ í•¨)
 */
 int net_init() {
 	struct sockaddr_in addr;
-	
-	/* SO_REUSEADDR ¿É¼Ç °ª */
+
+	/* SO_REUSEADDR ì˜µì…˜ ê°’ */
 	int opt = 1;
 
-	/* TCP ¸®½º´× ¼ÒÄÏ »ı¼º */
+	/* TCP ë¦¬ìŠ¤ë‹ ì†Œì¼“ ìƒì„± */
 	if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("socket error");
-		return 1;
+		return -1;
 	}
 
-	/* SO_REUSEADDR ¼³Á¤; TIME_WAIT »óÅÂ¿¡¼­µµ Æ÷Æ® Àç»ç¿ë °¡´É */
+	/* SO_REUSEADDR ì„¤ì •; TIME_WAIT ìƒíƒœì—ì„œë„ í¬íŠ¸ ì¬ì‚¬ìš© ê°€ëŠ¥ */
 	if ((setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) < 0) {
 		perror("setsockopt error");
-		return 1;
+		return -1;
 	}
 
-	/* ¼­¹ö ÁÖ¼Ò ±¸Á¶Ã¼ Á¶±âÈ­ */
+	/* ì„œë²„ ì£¼ì†Œ êµ¬ì¡°ì²´ ì¡°ê¸°í™” */
 	memset(&addr, 0x00, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(PORTNUM);
 
-	/* ¼ÒÄÏ¿¡ ÁÖ¼Ò ¹ÙÀÎµù */
+	/* ì†Œì¼“ì— ì£¼ì†Œ ë°”ì¸ë”© */
 	if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
 		perror("bind error");
-		return 1;
+		return -1;
 	}
 
-	/* listening »óÅÂ·Î ÀüÈ¯ */
+	/* listening ìƒíƒœë¡œ ì „í™˜ */
 	if (listen(listen_fd, 256) < 0) {
 		perror("listen error");
-		return 1;
+		return -1;
 	}
 
-	/* listening ¼ÒÄÏÀ» nonblokcing ¸ğµå·Î ¼³Á¤(epoll ±â¹İ ¼­¹ö¿¡¼­´Â ÇÊ¼ö) */
+	/* listening ì†Œì¼“ì„ nonblokcing ëª¨ë“œë¡œ ì„¤ì •(epoll ê¸°ë°˜ ì„œë²„ì—ì„œëŠ” í•„ìˆ˜) */
 	set_nonblocking(listen_fd);
 
-	/* epoll ÀÎ½ºÅÏ½º »ı¼º */
+	/* epoll ì¸ìŠ¤í„´ìŠ¤ ìƒì„± */
 	epfd = epoll_create1(0);
 	if (epfd < 0) {
 		perror("epoll error");
@@ -199,8 +201,8 @@ int net_init() {
 	}
 
 	/* 
-	* event fd »ı¼º 
-	* ³×Æ®¿öÅ© ½º·¹µå°¡ epoll_wait ÁßÀÏ ¶§ ¿ÜºÎ¿¡¼­ ±ú¿ì±â ¿ëµµ
+	* event fd ìƒì„± 
+	* ë„¤íŠ¸ì›Œí¬ ìŠ¤ë ˆë“œê°€ epoll_wait ì¤‘ì¼ ë•Œ ì™¸ë¶€ì—ì„œ ê¹¨ìš°ê¸° ìš©ë„
 	*/
 	wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (wake_fd < 0) {
@@ -209,8 +211,8 @@ int net_init() {
 	}
 
 	/*
-	* eventfd¸¦ epoll¿¡ µî·Ï
-	* EPOLLIN ÀÌº¥Æ® ¹ß»ı ½Ã epoll_wait°¡ Áï½Ã ±ú¾î³²
+	* eventfdë¥¼ epollì— ë“±ë¡
+	* EPOLLIN ì´ë²¤íŠ¸ ë°œìƒ ì‹œ epoll_waitê°€ ì¦‰ì‹œ ê¹¨ì–´ë‚¨
 	*/
 	struct epoll_event wev;
 	memset(&wev, 0, sizeof(wev));
@@ -225,8 +227,8 @@ int net_init() {
 	}
 
 	/*
-	* ¸®½º´× ¼ÒÄÏÀ» epoll¿¡ µî·Ï
-    * »õ·Î¿î Å¬¶óÀÌ¾ğÆ® ¿¬°á ¿äÃ»À» °¨ÁöÇÏ±â À§ÇÔ
+	* ë¦¬ìŠ¤ë‹ ì†Œì¼“ì„ epollì— ë“±ë¡
+    * ìƒˆë¡œìš´ í´ë¼ì´ì–¸íŠ¸ ì—°ê²° ìš”ì²­ì„ ê°ì§€í•˜ê¸° ìœ„í•¨
 	*/
 	struct epoll_event ev;
 	ev.events = EPOLLIN;
@@ -234,28 +236,28 @@ int net_init() {
 
 	epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
-	/* ¼­¹ö ÃÊ±âÈ­ ¿Ï·á */
+	/* ì„œë²„ ì´ˆê¸°í™” ì™„ë£Œ */
 	printf("Server is operating on port %d\n", PORTNUM);
 	return 0;
 }
 
 /*
-* ³×Æ®¿öÅ© ½º·¹µå ¸ŞÀÎ ·çÇÁ
-* - epoll ±â¹İ ÀÌº¥Æ® °¨½Ã
-* - accept / recv / send Ã³¸®
-* - IO Å¥¿¡¼­ Àü´ŞµÈ SEND ÀÛ¾÷ Ã³¸®
-* - ¿¬°á Á¾·á ¹× ¸®¼Ò½º Á¤¸®
+* ë„¤íŠ¸ì›Œí¬ ìŠ¤ë ˆë“œ ë©”ì¸ ë£¨í”„
+* - epoll ê¸°ë°˜ ì´ë²¤íŠ¸ ê°ì‹œ
+* - accept / recv / send ì²˜ë¦¬
+* - IO íì—ì„œ ì „ë‹¬ëœ SEND ì‘ì—… ì²˜ë¦¬
+* - ì—°ê²° ì¢…ë£Œ ë° ë¦¬ì†ŒìŠ¤ ì •ë¦¬
 */
 void net_run() {
 	struct epoll_event events[MAX_EVENTS];
 
-	/* Á¾·á ½ÅÈ£(g_terminate)°¡ ¿À±â Àü±îÁö ¹«ÇÑ ·çÇÁ */
+	/* ì¢…ë£Œ ì‹ í˜¸(g_terminate)ê°€ ì˜¤ê¸° ì „ê¹Œì§€ ë¬´í•œ ë£¨í”„ */
 	while (!g_terminate) {
 
-		/* ÀÌº¥Æ®(timeout = -1)°¡ ¿Ã ¶§±îÁö epoll ´ë±â */
+		/* ì´ë²¤íŠ¸(timeout = -1)ê°€ ì˜¬ ë•Œê¹Œì§€ epoll ëŒ€ê¸° */
 		int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
 		if (n < 0) {
-			/* ½Ã±×³Î·Î ±ú¾î³­ °æ¿ì Àç½Ãµµ*/
+			/* ì‹œê·¸ë„ë¡œ ê¹¨ì–´ë‚œ ê²½ìš° ì¬ì‹œë„*/
 			if (errno == EINTR)
 				continue;
 			perror("epoll wait error");
@@ -263,22 +265,22 @@ void net_run() {
 		}
 
 		/*
-		* wake_fd ÀÌº¥Æ® ¼±Ã³¸®
-		* IO Å¥¿¡ ÀÛ¾÷ÀÌ µé¾î¿ÔÀ½À» ¾Ë¸®´Â ¿ëµµ
-		* Ä«¿îÅÍ¸¦ ºñ¿ö epoll ÀÌº¥Æ®¸¦ ¼Ò°Å
+		* wake_fd ì´ë²¤íŠ¸ ì„ ì²˜ë¦¬
+		* IO íì— ì‘ì—…ì´ ë“¤ì–´ì™”ìŒì„ ì•Œë¦¬ëŠ” ìš©ë„
+		* ì¹´ìš´í„°ë¥¼ ë¹„ì›Œ epoll ì´ë²¤íŠ¸ë¥¼ ì†Œê±°
 		*/
 		for (int i = 0; i < n; ++i) {
 			if (events[i].data.fd == wake_fd && (events[i].events & EPOLLIN)) {
 				uint64_t v;
-				/* eventfd´Â ´©Àû Ä«¿îÅÍÀÌ¹Ç·Î ¸ğµÎ µå·¹ÀÎ */
+				/* eventfdëŠ” ëˆ„ì  ì¹´ìš´í„°ì´ë¯€ë¡œ ëª¨ë‘ ë“œë ˆì¸ */
 				while (read(wake_fd, &v, sizeof(v)) > 0) {}
 				break;
 			}
 		}
 
 		/*
-		* IO Å¥¿¡ ½×ÀÎ SEND ÀÛ¾÷ Ã³¸®
-		* ³×Æ®¿öÅ© Àü¼ÛÀº Ç×»ó ³×Æ®¿öÅ© ½º·¹µå¿¡¼­ ¼öÇà
+		* IO íì— ìŒ“ì¸ SEND ì‘ì—… ì²˜ë¦¬
+		* ë„¤íŠ¸ì›Œí¬ ì „ì†¡ì€ í•­ìƒ ë„¤íŠ¸ì›Œí¬ ìŠ¤ë ˆë“œì—ì„œ ìˆ˜í–‰
 		*/
 		job_t job;
 		while (job_queue_pop(&g_io_q, &job, JOBQ_NONBLOCK)) {
@@ -287,14 +289,14 @@ void net_run() {
 			}
 		}
 
-		/* epoll·Î Àü´ŞµÈ °¢ ÀÌº¥Æ® Ã³¸® */
+		/* epollë¡œ ì „ë‹¬ëœ ê° ì´ë²¤íŠ¸ ì²˜ë¦¬ */
 		for (int i = 0; i < n; ++i) {
 			int fd = events[i].data.fd;
 			uint32_t ev = events[i].events;
 
-			/* wake_fd´Â ÀÌ¹Ì À§¿¡¼­ Ã³¸®ÇØÀ¸¹Ç·Î °Ç³Ê¶Ü */
+			/* wake_fdëŠ” ì´ë¯¸ ìœ„ì—ì„œ ì²˜ë¦¬í•´ìœ¼ë¯€ë¡œ ê±´ë„ˆëœ€ */
 			if (fd == wake_fd) {
-				/* À§¿¡¼­ ÀÌ¹Ì µå·¹ÀÎ Çß´õ¶óµµ, È¤½Ã ³²¾ÒÀ¸¸é ÇÑ ¹ø ´õ ºñ¿ò */
+				/* ìœ„ì—ì„œ ì´ë¯¸ ë“œë ˆì¸ í–ˆë”ë¼ë„, í˜¹ì‹œ ë‚¨ì•˜ìœ¼ë©´ í•œ ë²ˆ ë” ë¹„ì›€ */
 				if (ev & EPOLLIN) {
 					uint64_t v;
 					while (read(wake_fd, &v, sizeof(v)) > 0) {}
@@ -302,20 +304,20 @@ void net_run() {
 				continue;
 			}
 
-			/* ¿¡·¯¿Í ²÷±è Ã³¸® */
+			/* ì—ëŸ¬ì™€ ëŠê¹€ ì²˜ë¦¬ */
 			if (ev & (EPOLLERR | EPOLLHUP)) {
 				net_disconnect(fd);
 				continue;
 			}
 
-			/* listen fd Ã³¸®(»õ·Î¿î Å¬¶óÀÌ¾ğÆ® ¿¬°á ¼ö¶ô) */
+			/* listen fd ì²˜ë¦¬(ìƒˆë¡œìš´ í´ë¼ì´ì–¸íŠ¸ ì—°ê²° ìˆ˜ë½) */
 			if (fd == listen_fd) {
 				struct sockaddr_in client_addr;
 				socklen_t clilen = sizeof(client_addr);
 
 				int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &clilen);
 
-				/* nonblocking accept Æ¯¼º»ó ´õ ÀÌ»ó ¾øÀ¸¸é ¹«½Ã */
+				/* nonblocking accept íŠ¹ì„±ìƒ ë” ì´ìƒ ì—†ìœ¼ë©´ ë¬´ì‹œ */
 				if (client_fd < 0) {
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						continue;
@@ -323,17 +325,17 @@ void net_run() {
 					break;
 				}
 
-				/* fd ¹üÀ§ ÃÊ°ú ¹æ¾î */
+				/* fd ë²”ìœ„ ì´ˆê³¼ ë°©ì–´ */
 				if (client_fd >= MAX_CLIENTS) {
 					printf("warning: fd=%d exceeds MAX_CLIENTS\n", client_fd);
 					close(client_fd);
 					continue;
 				}
 
-				/* »õ Å¬¶óÀÌ¾ğÆ® ¼ÒÄÏÀ» ³íºí·ÎÅ·À¸·Î ¼³Á¤ */
+				/* ìƒˆ í´ë¼ì´ì–¸íŠ¸ ì†Œì¼“ì„ ë…¼ë¸”ë¡œí‚¹ìœ¼ë¡œ ì„¤ì • */
 				set_nonblocking(client_fd);
 
-				/* connection ±¸Á¶Ã¼ »ı¼º ¹× ÃÊ±âÈ­ */
+				/* connection êµ¬ì¡°ì²´ ìƒì„± ë° ì´ˆê¸°í™” */
 				connection_t* conn = malloc(sizeof(connection_t));
 				if (!conn) {
 					close(client_fd);
@@ -346,19 +348,19 @@ void net_run() {
 				conn->send_offset = 0;
 				memset(conn->recv_buf, 0, RECV_BUF_SIZE);
 
-				/* fd -> connection ¸ÅÇÎ */
+				/* fd -> connection ë§¤í•‘ */
 				connections[client_fd] = conn;
 
 				printf("Client info : %s:%d (fd=%d)\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), client_fd);
 
-				/* »õ Å¬¶óÀÌ¾ğÆ® fd¸¦ epoll¿¡ µî·Ï */
+				/* ìƒˆ í´ë¼ì´ì–¸íŠ¸ fdë¥¼ epollì— ë“±ë¡ */
 				struct epoll_event cev;
 				cev.events = EPOLLIN;
 				cev.data.fd = client_fd;
 				epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev);
 			}
 
-			/* EPOLLIN(¼ö½Å ÀÌº¥Æ®) Ã³¸® */
+			/* EPOLLIN(ìˆ˜ì‹  ì´ë²¤íŠ¸) ì²˜ë¦¬ */
 			if (events[i].events & EPOLLIN) {
 				int cfd = events[i].data.fd;
 				connection_t* conn = connections[cfd];
@@ -367,7 +369,7 @@ void net_run() {
 
 				bool connection_closed = false;
 
-				/* nonblocking recv ·çÇÁ : ÀĞÀ» ¼ö ÀÖ´Â µ¥ÀÌÅÍ°¡ ¾øÀ» ¶§±îÁö ¹İº¹ */
+				/* nonblocking recv ë£¨í”„ : ì½ì„ ìˆ˜ ìˆëŠ” ë°ì´í„°ê°€ ì—†ì„ ë•Œê¹Œì§€ ë°˜ë³µ */
 				while (1) {
 					ssize_t n = recv(cfd, conn->recv_buf + conn->recv_len, RECV_BUF_SIZE - conn->recv_len, 0);
 
@@ -376,17 +378,17 @@ void net_run() {
 						packet_t pkt;
 
 						/*
-						* ¼ö½Å ¹öÆÛ¿¡¼­ ÆĞÅ¶ ´ÜÀ§·Î ÆÄ½Ì
-						* ÇÏ³ªÀÇ recv·Î ¿©·¯ ÆĞÅ¶ÀÌ µé¾î¿Ã ¼ö ÀÖÀ½
+						* ìˆ˜ì‹  ë²„í¼ì—ì„œ íŒ¨í‚· ë‹¨ìœ„ë¡œ íŒŒì‹±
+						* í•˜ë‚˜ì˜ recvë¡œ ì—¬ëŸ¬ íŒ¨í‚·ì´ ë“¤ì–´ì˜¬ ìˆ˜ ìˆìŒ
 						*/
 						while (1) {
 							int r = protocol_parse(conn, &pkt);
 
-							/* ¾ÆÁ÷ ÆĞÅ¶ÀÌ ¿Ï¼ºµÇÁö ¾ÊÀ½ */
+							/* ì•„ì§ íŒ¨í‚·ì´ ì™„ì„±ë˜ì§€ ì•ŠìŒ */
 							if (r == 0)
 								break;
 							if (r < 0) {
-								/* ÇÁ·ÎÅäÄİ À§¹İ */
+								/* í”„ë¡œí† ì½œ ìœ„ë°˜ */
 								printf("[ERROR] protocol violation fd=%d\n", cfd);
 								net_disconnect(cfd);
 								connection_closed = true;
@@ -398,19 +400,19 @@ void net_run() {
 							job.fd = cfd;
 							job.packet = pkt;
 
-							/* ÆÄ½ÌµÈ ÆĞÅ¶À» ·ÎÁ÷ ½º·¹µå·Î Àü´Ş */
+							/* íŒŒì‹±ëœ íŒ¨í‚·ì„ ë¡œì§ ìŠ¤ë ˆë“œë¡œ ì „ë‹¬ */
 							job_queue_push_packet(&g_logic_q, cfd, &pkt);
 
 							printf("[PACKET] fd=%d type=%d len=%d\n", cfd, pkt.type, pkt.length);
 						}
 					}
 					else if (n == 0) {
-						/* Á¤»ó Á¾·á */
+						/* ì •ìƒ ì¢…ë£Œ */
 						net_disconnect(cfd);
 						break;
 					}
 					else {
-						/* ´õ ÀÌ»ó ÀĞÀ» µ¥ÀÌÅÍ ¾øÀ½ */
+						/* ë” ì´ìƒ ì½ì„ ë°ì´í„° ì—†ìŒ */
 						if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							break;
 						}
@@ -424,8 +426,8 @@ void net_run() {
 			}
 
 			/* 
-			* EPOLLOUT(¼Û½Å ÀÌº¥Æ®) Ã³¸®
-			* send ¹öÆÛ¿¡ ½×ÀÎ µ¥ÀÌÅÍ¸¦ ½ÇÁ¦ ¼ÒÄÏÀ¸·Î Àü¼Û
+			* EPOLLOUT(ì†¡ì‹  ì´ë²¤íŠ¸) ì²˜ë¦¬
+			* send ë²„í¼ì— ìŒ“ì¸ ë°ì´í„°ë¥¼ ì‹¤ì œ ì†Œì¼“ìœ¼ë¡œ ì „ì†¡
 			*/
 			if (events[i].events & EPOLLOUT) {
 				connection_t* conn = connections[fd];
@@ -445,12 +447,12 @@ void net_run() {
 					}
 				}
 
-				/* ¸ğµç µ¥ÀÌÅÍ¸¦ Àü¼ÛÇÑ °æ¿ì EPOLLOUT ºñÈ°¼ºÈ­ */
+				/* ëª¨ë“  ë°ì´í„°ë¥¼ ì „ì†¡í•œ ê²½ìš° EPOLLOUT ë¹„í™œì„±í™” */
 				if (conn->send_offset == conn->send_len) {
 					conn->send_offset = 0;
 					conn->send_len = 0;
 
-					/* EPOLLOUT Á¦°Å */
+					/* EPOLLOUT ì œê±° */
 					struct epoll_event ev;
 					ev.events = EPOLLIN;
 					ev.data.fd = fd;
@@ -461,20 +463,20 @@ void net_run() {
 		}
 	}
 
-	/* ¼­¹ö Á¾·á ½Ã listening ¼ÒÄÏ Á¤¸® */
+	/* ì„œë²„ ì¢…ë£Œ ì‹œ listening ì†Œì¼“ ì •ë¦¬ */
 	if (listen_fd >= 0) {
 		close(listen_fd);
 		listen_fd = -1;
 	}
 
-	/* ¸ğµç ¿¬°á Á¤¸® */
+	/* ëª¨ë“  ì—°ê²° ì •ë¦¬ */
 	for (int fd = 0; fd < MAX_CLIENTS; fd++) {
 		if (connections[fd]) {
 			close_connection(fd);
 		}
 	}
 
-	/* epoll ÀÎ½ºÅÏ½º Á¾·á */
+	/* epoll ì¸ìŠ¤í„´ìŠ¤ ì¢…ë£Œ */
 	if (epfd >= 0) {
 		close(epfd);
 		epfd = -1;

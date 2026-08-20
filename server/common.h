@@ -38,30 +38,30 @@
 extern volatile sig_atomic_t g_terminate;
 
 typedef enum {
-	PKT_CHAT = 1,        // Ã¤ÆÃ
-	PKT_JOIN_ROOM,       // ¹æ ÀÔÀå
-	PKT_LEAVE_ROOM,      // ¹æ ÅğÀå
-	PKT_GAME_ACTION,     // °ÔÀÓ ÀÔ·Â
-	PKT_GAME_RESULT,     // °ÔÀÓ °á°ú
+	PKT_CHAT = 1,        // ì±„íŒ…
+	PKT_JOIN_ROOM,       // ë°© ì…ì¥
+	PKT_LEAVE_ROOM,      // ë°© í‡´ì¥
+	PKT_GAME_ACTION,     // ê²Œì„ ì…ë ¥
+	PKT_GAME_RESULT,     // ê²Œì„ ê²°ê³¼
 } packet_type_t;
 
 typedef struct {
-	uint16_t type;					// ÇÁ·ÎÅäÄİ Á¾·ù
-	uint16_t length;				// payload ½ÇÁ¦ ±æÀÌ
-	char payload[MAX_PACKET_SIZE];	// °¡º¯ µ¥ÀÌÅÍ ¿µ¿ª
+	uint16_t type;					// í”„ë¡œí† ì½œ ì¢…ë¥˜
+	uint16_t length;				// payload ì‹¤ì œ ê¸¸ì´
+	char payload[MAX_PACKET_SIZE];	// ê°€ë³€ ë°ì´í„° ì˜ì—­
 } packet_t;
 
 typedef struct {
 	int fd;
 
 	// recv
-	char recv_buf[RECV_BUF_SIZE];	// ¼ö½Å ¹öÆÛ
-	int recv_len;					// ÇöÀç ¼ö½ÅµÈ ¹öÆÛ ±æÀÌ	
+	char recv_buf[RECV_BUF_SIZE];	// ìˆ˜ì‹  ë²„í¼
+	int recv_len;					// í˜„ì¬ ìˆ˜ì‹ ëœ ë²„í¼ ê¸¸ì´	
 
 	// send
-	char send_buf[SEND_BUF_SIZE];	// ¼Û½Å ¹öÆÛ
-	int send_len;					// ¼Û½ÅÇØ¾ß ÇÒ ÀüÃ¼ µ¥ÀÌÅÍ ±æÀÌ
-	int send_offset;				// ÀÌ¹Ì Àü¼ÛµÈ ¹ÙÀÌÆ® ¼ö(ºÎºĞ Àü¼ÛÀ» À§ÇØ ÇÊ¿ä)
+	char send_buf[SEND_BUF_SIZE];	// ì†¡ì‹  ë²„í¼
+	int send_len;					// ì†¡ì‹ í•´ì•¼ í•  ì „ì²´ ë°ì´í„° ê¸¸ì´
+	int send_offset;				// ì´ë¯¸ ì „ì†¡ëœ ë°”ì´íŠ¸ ìˆ˜(ë¶€ë¶„ ì „ì†¡ì„ ìœ„í•´ í•„ìš”)
 } connection_t;
 
 #endif

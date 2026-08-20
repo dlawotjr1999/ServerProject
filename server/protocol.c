@@ -3,52 +3,52 @@
 int protocol_parse(connection_t* conn, packet_t* out)
 {
     /*
-    * ÃÖ¼Ò Çì´õ Å©±â °Ë»ç
-    * legnth¿Í type ¸ðµÎ °¢°¢ uint16_t
-    * length(2) + type(2) = ÃÖ¼Ò 4¹ÙÀÌÆ® ÇÊ¿ä
+    * ìµœì†Œ í—¤ë” í¬ê¸° ê²€ì‚¬
+    * legnthì™€ type ëª¨ë‘ ê°ê° uint16_t
+    * length(2) + type(2) = ìµœì†Œ 4ë°”ì´íŠ¸ í•„ìš”
     */
     if (conn->recv_len < 4)
         return 0;
 
     /*
-    * ÆÐÅ¶ ±æÀÌ ÇÊµå ÃßÃâ : recv_buf[0~1]
-    * pkt_len = (type + payload)ÀÇ ±æÀÌ
-    * ÀÌÈÄ È£½ºÆ® ¼ø¼­·Î º¯È¯
+    * íŒ¨í‚· ê¸¸ì´ í•„ë“œ ì¶”ì¶œ : recv_buf[0~1]
+    * pkt_len = (type + payload)ì˜ ê¸¸ì´
+    * ì´í›„ í˜¸ìŠ¤íŠ¸ ìˆœì„œë¡œ ë³€í™˜
     */
     uint16_t pkt_len;
     memcpy(&pkt_len, conn->recv_buf, sizeof(uint16_t));
     pkt_len = ntohs(pkt_len);
 
     /*
-    * Á¤»ó ÆÐÅ¶ ¿©ºÎ È®ÀÎ
-    * ÀüÃ¼ ÆÐÅ¶ ±æÀÌ°¡ 2º¸´Ù ÀÛ°Å³ª ÃÖ´ë (payload + length) Å©±â¸¦ ÃÊ°úÇÏ¸é ºñÁ¤»ó ÆÐÅ¶À¸·Î ÆÇ´Ü
+    * ì •ìƒ íŒ¨í‚· ì—¬ë¶€ í™•ì¸
+    * ì „ì²´ íŒ¨í‚· ê¸¸ì´ê°€ 2ë³´ë‹¤ ìž‘ê±°ë‚˜ ìµœëŒ€ (payload + length) í¬ê¸°ë¥¼ ì´ˆê³¼í•˜ë©´ ë¹„ì •ìƒ íŒ¨í‚·ìœ¼ë¡œ íŒë‹¨
     */
     if (pkt_len < 2 || pkt_len >(MAX_PACKET_SIZE + 2)) 
         return -1;
 
     /* 
-    * ÀüÃ¼ ÆÐÅ¶ÀÌ ¾ÆÁ÷ ¾È µé¾î¿È 
-    * Áï, ÇöÀç ¼ö½ÅµÈ ¹ÙÀÌÆ® ¼ö < (type + payload) + length(2)ÀÎ °æ¿ì
+    * ì „ì²´ íŒ¨í‚·ì´ ì•„ì§ ì•ˆ ë“¤ì–´ì˜´ 
+    * ì¦‰, í˜„ìž¬ ìˆ˜ì‹ ëœ ë°”ì´íŠ¸ ìˆ˜ < (type + payload) + length(2)ì¸ ê²½ìš°
     */
     if ((size_t)conn->recv_len < pkt_len + sizeof(uint16_t))
         return 0;
     
     /*
-    * ÆÐÅ¶ Å¸ÀÔ ÇÊµå ÃßÃâ : recv_buf[2~3]
-    * ÀÌÈÄ È£½ºÆ® ¼ø¼­·Î º¯È¯
+    * íŒ¨í‚· íƒ€ìž… í•„ë“œ ì¶”ì¶œ : recv_buf[2~3]
+    * ì´í›„ í˜¸ìŠ¤íŠ¸ ìˆœì„œë¡œ ë³€í™˜
     */
     uint16_t pkt_type;
     memcpy(&pkt_type, conn->recv_buf + 2, sizeof(uint16_t));
     pkt_type = ntohs(pkt_type);
 
-    /* ÆÄ½Ì °á°ú¸¦ out ÆÐÅ¶¿¡ ÀúÀå */
+    /* íŒŒì‹± ê²°ê³¼ë¥¼ out íŒ¨í‚·ì— ì €ìž¥ */
     out->length = pkt_len;
     out->type = pkt_type;
 
     /*
-    * ÀüÃ¼ ÆÐÅ¶ÀÌ ¼ö½ÅµÇ¾ú´ÂÁö È®ÀÎ
-    * payload_len = pkt_len(type + payloadÀÇ ±æÀÌ) - type ÇÊµåÀÇ ±æÀÌ(2)
-    * ÇÑ ¹øÀÇ recv·Î ÆÐÅ¶ ÀüÃ¼°¡ µé¾î¿Ã°Å¶ó´Â º¸ÀåÀÌ ¾ø±â ¶§¹®
+    * ì „ì²´ íŒ¨í‚·ì´ ìˆ˜ì‹ ë˜ì—ˆëŠ”ì§€ í™•ì¸
+    * payload_len = pkt_len(type + payloadì˜ ê¸¸ì´) - type í•„ë“œì˜ ê¸¸ì´(2)
+    * í•œ ë²ˆì˜ recvë¡œ íŒ¨í‚· ì „ì²´ê°€ ë“¤ì–´ì˜¬ê±°ë¼ëŠ” ë³´ìž¥ì´ ì—†ê¸° ë•Œë¬¸
     */
     int payload_len = pkt_len - sizeof(uint16_t);
     if (payload_len > 0) {
@@ -56,15 +56,15 @@ int protocol_parse(connection_t* conn, packet_t* out)
     }
 
     /*
-    * recv ¹öÆÛ Á¤¸®
-    * ³²Àº ¹ÙÀÌÆ® ¼ö = ÇöÀç ¼ö½ÅµÈ ÀüÃ¼ ¹ÙÀÌÆ® ¼ö - (pkt_len + length ÇÊµåÀÇ ±æÀÌ(2))
-    * ÇöÀç ÆÐÅ¶ÀÇ ³¡ ºÎºÐ(´ÙÀ½ ÆÐÅ¶ÀÇ ½ÃÀÛ À§Ä¡) = conn->recv_buf + pkt_len + 2
-    * ÇöÀç ÆÐÅ¶À» Á¦°ÅÇÏ°í, µÚ¿¡ ³²Àº µ¥ÀÌÅÍ(´ÙÀ½ ÆÐÅ¶ ¶Ç´Â ÀÏºÎ ÆÐÅ¶)¸¦ ¹öÆÛ ¾ÕÀ¸·Î ´ç±è
+    * recv ë²„í¼ ì •ë¦¬
+    * ë‚¨ì€ ë°”ì´íŠ¸ ìˆ˜ = í˜„ìž¬ ìˆ˜ì‹ ëœ ì „ì²´ ë°”ì´íŠ¸ ìˆ˜ - (pkt_len + length í•„ë“œì˜ ê¸¸ì´(2))
+    * í˜„ìž¬ íŒ¨í‚·ì˜ ë ë¶€ë¶„(ë‹¤ìŒ íŒ¨í‚·ì˜ ì‹œìž‘ ìœ„ì¹˜) = conn->recv_buf + pkt_len + 2
+    * í˜„ìž¬ íŒ¨í‚·ì„ ì œê±°í•˜ê³ , ë’¤ì— ë‚¨ì€ ë°ì´í„°(ë‹¤ìŒ íŒ¨í‚· ë˜ëŠ” ì¼ë¶€ íŒ¨í‚·)ë¥¼ ë²„í¼ ì•žìœ¼ë¡œ ë‹¹ê¹€
     */
     int remain = conn->recv_len - (pkt_len + 2);
     memmove(conn->recv_buf, conn->recv_buf + pkt_len + 2, remain);
     conn->recv_len = remain;
 
-    /* ÆÄ½Ì ¼º°ø */
+    /* íŒŒì‹± ì„±ê³µ */
     return 1;
 }
