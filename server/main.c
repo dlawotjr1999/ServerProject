@@ -41,14 +41,17 @@ int main() {
 	job_queue_init(&g_logic_q);
 	job_queue_init(&g_io_q);
 
-	/* 로직 worker thread 생성 */
+	/*
+	* 로직 worker thread 생성
+	* detach하지 않고 tid를 배열에 보관 -> 종료 시 pthread_join으로 정리 완료를 기다리기 위함
+	* (k8s가 pod 삭제 시 보내는 SIGTERM에 대해 graceful termination을 보장해야 함)
+	*/
+	pthread_t worker_tids[WORKER_THREAD_NUM];
 	for(int i = 0; i < WORKER_THREAD_NUM; ++i) {
-		pthread_t tid;
-		if (pthread_create(&tid, NULL, worker_thread, NULL) != 0) {
+		if (pthread_create(&worker_tids[i], NULL, worker_thread, NULL) != 0) {
 			perror("pthread_create");
 			exit(1);
 		}
-		pthread_detach(tid);
 	}
 
 	/* 네트워크 모듈 초기화 */
@@ -57,14 +60,18 @@ int main() {
 		exit(1);
 	}
 
-	/* 
-	* 네트워크 이벤트 루프 실행 
+	/*
+	* 네트워크 이벤트 루프 실행
 	* net_run이 반환하면 종료 절차를 수행
-	* 종료 절차는 각 worker thread가 shutdown을 하나씩 받을 수 있게 하도록 함
+	* 종료 절차는 각 worker thread가 shutdown을 하나씩 받게 한 뒤,
+	* 전부 정리를 마칠 때까지 join으로 대기함 -> worker 정리 전에 프로세스가 먼저 죽는 것을 방지
 	*/
 	net_run();
 	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
 		job_queue_push_shutdown(&g_logic_q);
+	}
+	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
+		pthread_join(worker_tids[i], NULL);
 	}
 
 	return 0;
