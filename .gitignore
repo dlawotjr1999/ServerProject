@@ -20,4 +20,8 @@
 
 # End of https://www.toptal.com/developers/gitignore/api/linux
 
+### Build artifacts ###
+server/*.o
+server/server
+
 2026-08-20-infra-expansion-design.md

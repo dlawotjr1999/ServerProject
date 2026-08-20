@@ -1,6 +1,7 @@
 #include "logic.h"
 #include "job_queue.h"
 #include "state.h"
+#include "log.h"
 #include <stdio.h>
 
 extern job_queue_t g_logic_q;
@@ -36,14 +37,19 @@ void* worker_thread(void* arg)
 			if (!s) s = session_create(job.fd);
 
 			if (!s || !s->alive) {
-				printf("[ERROR] session create failed fd=%d\n", job.fd);
+				log_json("ERROR", "session_create_failed", "fd", LOG_ARG_INT, job.fd, NULL);
 				break;
 			}
 
 			/* 패킷 타입별 논리 처리 */
 			handle_packet(s, &job.packet);
 
-			printf("[WORKER] sid=%d fd=%d type=%d len=%d\n", s->session_id, job.fd, job.packet.type, job.packet.length);
+			log_json("INFO", "packet_handled",
+				"session_id", LOG_ARG_INT, s->session_id,
+				"fd", LOG_ARG_INT, job.fd,
+				"type", LOG_ARG_INT, job.packet.type,
+				"len", LOG_ARG_INT, job.packet.length,
+				NULL);
 			break;
 		}
 
@@ -136,7 +142,11 @@ static void handle_disconnect(int fd) {
 		return;
 	}
 
-	printf("[LOGIC] fd=%d disconnect event\n", fd);
+	log_json("INFO", "disconnect_handled",
+		"fd", LOG_ARG_INT, fd,
+		"session_id", LOG_ARG_INT, s->session_id,
+		"room_id", LOG_ARG_INT, s->room_id,
+		NULL);
 
 	/* 방에 들어가 있었다면 방에서 제거 */
 	if (s->room_id >= 0) {
@@ -149,7 +159,7 @@ static void handle_disconnect(int fd) {
 
 static void handle_shutdown(void)
 {
-	printf("[LOGIC] graceful shutdown started\n");
+	log_json("INFO", "shutdown_started", NULL);
 
 	/*
 	* fd 순회를 통해 존재하는 세션을 찾아 제거함
@@ -167,5 +177,5 @@ static void handle_shutdown(void)
 		session_remove(fd);
 	}
 
-	printf("[LOGIC] graceful shutdown completed\n");
+	log_json("INFO", "shutdown_completed", NULL);
 }

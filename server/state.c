@@ -1,5 +1,6 @@
 ﻿#include "state.h"
 #include "job_queue.h"
+#include "log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -64,7 +65,7 @@ session_t* session_create(int fd)
 
     pthread_mutex_unlock(&g_sessions_lock);
 
-    printf("[SESSION] created session id=%d fd=%d\n", s->session_id, fd);
+    log_json("INFO", "session_created", "session_id", LOG_ARG_INT, s->session_id, "fd", LOG_ARG_INT, fd, NULL);
     return s;
 }
 
@@ -113,7 +114,7 @@ void session_remove(int fd)
     s->alive = false;
     pthread_mutex_unlock(&g_sessions_lock);
 
-    printf("[SESSION] removed sid=%d fd=%d\n", s->session_id, fd);
+    log_json("INFO", "session_removed", "session_id", LOG_ARG_INT, s->session_id, "fd", LOG_ARG_INT, fd, NULL);
     free(s);
 }
 
@@ -146,7 +147,7 @@ room_t* room_create(void)
 
     pthread_mutex_unlock(&g_rooms_lock);
 
-    printf("[ROOM] created room_id=%d\n", r->room_id);
+    log_json("INFO", "room_created", "room_id", LOG_ARG_INT, r->room_id, NULL);
     return r;
 }
 
@@ -212,7 +213,7 @@ void room_join(room_t* room, session_t* s)
     room->users[room->user_count++] = s;
     s->room_id = room->room_id;
 
-    printf("[ROOM] sid=%d joined room=%d\n", s->session_id, room->room_id);
+    log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room->room_id, NULL);
 
     pthread_mutex_unlock(&room->lock);
 }
@@ -249,7 +250,7 @@ void room_leave(session_t* s)
     }
 
     /* 현재 세션의 방 소속 정보 초기화 */
-    printf("[ROOM] sid=%d left room=%d\n", s->session_id, s->room_id);
+    log_json("INFO", "room_left", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, s->room_id, NULL);
     s->room_id = -1;
 
     pthread_mutex_unlock(&room->lock);

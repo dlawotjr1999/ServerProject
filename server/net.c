@@ -5,6 +5,7 @@
 #include "protocol.h"
 #include "job_queue.h"
 #include "state.h"
+#include "log.h"
 
 static int listen_fd = -1;
 static int epfd = -1;
@@ -62,7 +63,7 @@ static void close_connection(int fd)
 	free(conn);
 	connections[fd] = NULL;
 
-	printf("[INFO] Connection closed fd=%d\n", fd);
+	log_json("INFO", "close", "fd", LOG_ARG_INT, fd, NULL);
 }
 
 /*
@@ -78,6 +79,7 @@ static void net_disconnect(int fd)
 
 	/* 세션 / 룸 상태 정리는 로직 스레드에서 처리하도록 DISCONNECT 작업을 큐에 전달 */
 	job_queue_push_disconnect(&g_logic_q, fd);
+	log_json("INFO", "disconnect_queued", "fd", LOG_ARG_INT, fd, NULL);
 }
 
 /* 소켓을 nonblocking 모드로 설정하는 함수 */
@@ -237,7 +239,7 @@ int net_init() {
 	epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
 	/* 서버 초기화 완료 */
-	printf("Server is operating on port %d\n", PORTNUM);
+	log_json("INFO", "server_started", "port", LOG_ARG_INT, PORTNUM, NULL);
 	return 0;
 }
 
@@ -327,7 +329,7 @@ void net_run() {
 
 				/* fd 범위 초과 방어 */
 				if (client_fd >= MAX_CLIENTS) {
-					printf("warning: fd=%d exceeds MAX_CLIENTS\n", client_fd);
+					log_json("WARN", "fd_limit_exceeded", "fd", LOG_ARG_INT, client_fd, NULL);
 					close(client_fd);
 					continue;
 				}
@@ -351,7 +353,11 @@ void net_run() {
 				/* fd -> connection 매핑 */
 				connections[client_fd] = conn;
 
-				printf("Client info : %s:%d (fd=%d)\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), client_fd);
+				log_json("INFO", "accept",
+					"fd", LOG_ARG_INT, client_fd,
+					"ip", LOG_ARG_STR, inet_ntoa(client_addr.sin_addr),
+					"port", LOG_ARG_INT, ntohs(client_addr.sin_port),
+					NULL);
 
 				/* 새 클라이언트 fd를 epoll에 등록 */
 				struct epoll_event cev;
@@ -389,7 +395,7 @@ void net_run() {
 								break;
 							if (r < 0) {
 								/* 프로토콜 위반 */
-								printf("[ERROR] protocol violation fd=%d\n", cfd);
+								log_json("ERROR", "protocol_violation", "fd", LOG_ARG_INT, cfd, NULL);
 								net_disconnect(cfd);
 								connection_closed = true;
 								break;
@@ -403,7 +409,11 @@ void net_run() {
 							/* 파싱된 패킷을 로직 스레드로 전달 */
 							job_queue_push_packet(&g_logic_q, cfd, &pkt);
 
-							printf("[PACKET] fd=%d type=%d len=%d\n", cfd, pkt.type, pkt.length);
+							log_json("INFO", "packet_received",
+								"fd", LOG_ARG_INT, cfd,
+								"type", LOG_ARG_INT, pkt.type,
+								"len", LOG_ARG_INT, pkt.length,
+								NULL);
 						}
 					}
 					else if (n == 0) {
