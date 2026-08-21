@@ -61,6 +61,16 @@ int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode) {
 	return 1;
 }
 
+/* 큐에 대기 중인 job 개수를 조회하는 함수 (메트릭 노출용) */
+int job_queue_depth(job_queue_t* q) {
+	/* count는 push/pop 스레드가 동시에 변경할 수 있으므로 mutex로 보호된 상태에서 읽음 */
+	pthread_mutex_lock(&q->mutex);
+	int depth = q->count;
+	pthread_mutex_unlock(&q->mutex);
+
+	return depth;
+}
+
 /* ======================= 이하 helper 함수 ======================= */
 /* job 타입별로 필수 필드가 다르므로, 생성 규칙을 한 곳에 모음 */
 /* 또한, job_t의 내부 구조가 바뀌어도(필드 추가/초기화 규칙 변경) helper만 수정하면 됨 */

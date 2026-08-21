@@ -2,6 +2,7 @@
 #include "job_queue.h"
 #include "state.h"
 #include "log.h"
+#include "metrics.h"
 #include <stdio.h>
 
 extern job_queue_t g_logic_q;
@@ -114,6 +115,9 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		if (!r)
 			break;
 		room_broadcast(r, s, pkt);
+
+		/* 브로드캐스트된 채팅 메시지 수 누적 (메트릭 노출용) */
+		metrics_inc_messages();
 		break;
 	}
 

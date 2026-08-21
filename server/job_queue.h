@@ -34,6 +34,7 @@ typedef struct {
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
 int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode);
+int job_queue_depth(job_queue_t* q);
 
 void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt);
 void job_queue_push_disconnect(job_queue_t* q, int fd);

@@ -6,8 +6,10 @@
 #include "job_queue.h"
 #include "state.h"
 #include "log.h"
+#include "metrics.h"
 
 static int listen_fd = -1;
+static int metrics_listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
 
@@ -80,6 +82,9 @@ static void net_disconnect(int fd)
 	/* 세션 / 룸 상태 정리는 로직 스레드에서 처리하도록 DISCONNECT 작업을 큐에 전달 */
 	job_queue_push_disconnect(&g_logic_q, fd);
 	log_json("INFO", "disconnect_queued", "fd", LOG_ARG_INT, fd, NULL);
+
+	/* 연결 종료 지표 누적 (메트릭 노출용) */
+	metrics_inc_disconnects();
 }
 
 /* 소켓을 nonblocking 모드로 설정하는 함수 */
@@ -148,6 +153,74 @@ static void handle_send_job(job_t* job)
 	if (packet_send(fd, &job->packet) < 0) {
 		net_disconnect(fd);
 	}
+}
+
+/*
+* 메트릭/헬스체크 스크레이퍼 연결을 처리하는 함수
+* 채팅 클라이언트와 달리 요청/응답이 짧고 일회성이므로, epoll에 등록하지 않고
+* accept 즉시 이 자리에서 동기적으로 처리 후 close (net thread를 오래 막지 않도록 타임아웃을 둠)
+*/
+static void handle_metrics_accept(void)
+{
+	struct sockaddr_in addr;
+	socklen_t alen = sizeof(addr);
+
+	/* metrics_listen_fd는 nonblocking이므로 대기 중인 연결이 없으면 -1과 함께 즉시 반환됨 */
+	int cfd = accept(metrics_listen_fd, (struct sockaddr*)&addr, &alen);
+	if (cfd < 0)
+		return;
+
+	/*
+	* accept로 얻은 소켓은 기본적으로 blocking 상태로 생성됨
+	* 응답을 늦게 받거나 안 받는 스크레이퍼가 붙어도 net 스레드가 무한정 멈추지 않도록
+	* 수신/송신 각각에 짧은 타임아웃을 걸어둠
+	*/
+	struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+	setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	/* HTTP 요청의 첫 줄(GET /path HTTP/1.1)만 보면 충분하므로 헤더 전체를 파싱하지 않고 일부만 수신 */
+	char req[512];
+	ssize_t n = recv(cfd, req, sizeof(req) - 1, 0);
+	if (n <= 0) {
+		close(cfd);
+		return;
+	}
+	req[n] = '\0';
+
+	char body[4096];
+	int body_len;
+	const char* status_line;
+
+	/* 요청 라인 접두어만으로 경로를 판별 (쿼리스트링 없는 단순 스크레이핑 요청만 가정) */
+	if (strncmp(req, "GET /metrics ", 13) == 0) {
+		body_len = metrics_render(body, sizeof(body));
+		status_line = "200 OK";
+	}
+	else if (strncmp(req, "GET /healthz ", 13) == 0) {
+		/* liveness: 이 코드가 실행 중이라는 사실 자체가 프로세스 생존의 증거이므로 항상 OK */
+		body_len = snprintf(body, sizeof(body), "ok\n");
+		status_line = "200 OK";
+	}
+	else if (strncmp(req, "GET /readyz ", 12) == 0) {
+		/* readiness: 지금은 고정 OK. 1-4에서 net_init의 실제 bind 성공 여부를 반영하도록 교체 예정 */
+		body_len = snprintf(body, sizeof(body), "ok\n");
+		status_line = "200 OK";
+	}
+	else {
+		body_len = snprintf(body, sizeof(body), "not found\n");
+		status_line = "404 Not Found";
+	}
+
+	/* Content-Length를 정확히 채워야 curl/Prometheus 등 클라이언트가 응답의 끝을 올바르게 인식함 */
+	char resp[4096 + 256];
+	int resp_len = snprintf(resp, sizeof(resp),
+		"HTTP/1.1 %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		status_line, body_len, body);
+
+	ssize_t sent = send(cfd, resp, (size_t)resp_len, 0);
+	(void)sent; /* 스크레이퍼가 응답을 끝까지 못 받아도 서버 자체 동작에는 영향이 없으므로 무시 */
+	close(cfd);
 }
 
 /*
@@ -238,8 +311,47 @@ int net_init() {
 
 	epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
 
+	/*
+	* 메트릭/헬스체크용 두 번째 리스닝 소켓 생성
+	* listen_fd와 동일한 패턴(생성 -> SO_REUSEADDR -> bind -> listen -> nonblocking -> epoll 등록)으로 구성
+	*/
+	if ((metrics_listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		perror("metrics socket error");
+		return -1;
+	}
+
+	if (setsockopt(metrics_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+		perror("metrics setsockopt error");
+		return -1;
+	}
+
+	/* 채팅용 주소 구조체(addr)와 별개로, 포트만 METRICS_PORT로 다르게 구성 */
+	struct sockaddr_in metrics_addr;
+	memset(&metrics_addr, 0x00, sizeof(metrics_addr));
+	metrics_addr.sin_family = AF_INET;
+	metrics_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	metrics_addr.sin_port = htons(METRICS_PORT);
+
+	if (bind(metrics_listen_fd, (struct sockaddr*)&metrics_addr, sizeof(metrics_addr)) < 0) {
+		perror("metrics bind error");
+		return -1;
+	}
+
+	/* 스크레이퍼 전용 소켓이므로 채팅 리스닝 소켓(256)보다 훨씬 작은 backlog로 충분함 */
+	if (listen(metrics_listen_fd, 16) < 0) {
+		perror("metrics listen error");
+		return -1;
+	}
+
+	set_nonblocking(metrics_listen_fd);
+
+	/* 위에서 쓴 ev 변수를 재사용해 metrics_listen_fd도 같은 epoll 인스턴스(epfd)에 등록 */
+	ev.events = EPOLLIN;
+	ev.data.fd = metrics_listen_fd;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, metrics_listen_fd, &ev);
+
 	/* 서버 초기화 완료 */
-	log_json("INFO", "server_started", "port", LOG_ARG_INT, PORTNUM, NULL);
+	log_json("INFO", "server_started", "port", LOG_ARG_INT, PORTNUM, "metrics_port", LOG_ARG_INT, METRICS_PORT, NULL);
 	return 0;
 }
 
@@ -303,6 +415,12 @@ void net_run() {
 					uint64_t v;
 					while (read(wake_fd, &v, sizeof(v)) > 0) {}
 				}
+				continue;
+			}
+
+			/* 메트릭/헬스체크 스크레이퍼 연결 처리 (채팅 연결과 다른 경로이므로 이후 로직으로 흘러가지 않도록 continue) */
+			if (fd == metrics_listen_fd) {
+				handle_metrics_accept();
 				continue;
 			}
 
@@ -477,6 +595,11 @@ void net_run() {
 	if (listen_fd >= 0) {
 		close(listen_fd);
 		listen_fd = -1;
+	}
+	/* 메트릭/헬스체크용 리스닝 소켓도 함께 정리 */
+	if (metrics_listen_fd >= 0) {
+		close(metrics_listen_fd);
+		metrics_listen_fd = -1;
 	}
 
 	/* 모든 연결 정리 */

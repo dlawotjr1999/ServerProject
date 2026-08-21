@@ -328,3 +328,40 @@ void room_broadcast(room_t* room, session_t* sender, packet_t* pkt)
     /* IO 스레드를 깨워 큐에 쌓인 작업 처리 유도 */
     net_wakeup();
 }
+
+/* ============================ Metrics ============================ */
+
+/* 현재 활성 세션 수를 세는 함수 (메트릭 노출용) */
+int state_count_active_sessions(void)
+{
+    int count = 0;
+
+    /* 세션 테이블은 공유 자원이므로 스캔하는 동안 mutex로 보호 */
+    pthread_mutex_lock(&g_sessions_lock);
+    for (int fd = 0; fd < MAX_CLIENTS; ++fd) {
+        /* session_remove()가 제거 시 sessions[fd]를 NULL로 만들어두므로, non-NULL 개수가 곧 활성 세션 수 */
+        if (sessions[fd]) count++;
+    }
+    pthread_mutex_unlock(&g_sessions_lock);
+
+    return count;
+}
+
+/* 인원이 1명 이상인 방의 수를 세는 함수 (메트릭 노출용) */
+int state_count_active_rooms(void)
+{
+    int count = 0;
+
+    /* room 테이블도 공유 자원이므로 스캔하는 동안 mutex로 보호 */
+    pthread_mutex_lock(&g_rooms_lock);
+    for (int i = 0; i < MAX_ROOMS; ++i) {
+        /*
+        * room_count는 생성된 방 수만 누적되고 빈 방이 회수되지 않으므로(2단계에서 수정 예정)
+        * 그 값을 그대로 쓰지 않고, user_count > 0인 방만 세어 실제 사용 중인 방 수를 구함
+        */
+        if (rooms[i].user_count > 0) count++;
+    }
+    pthread_mutex_unlock(&g_rooms_lock);
+
+    return count;
+}

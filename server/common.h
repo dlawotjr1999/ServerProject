@@ -22,6 +22,7 @@
 
 
 #define PORTNUM 3800
+#define METRICS_PORT 9100
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 4096
 

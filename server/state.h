@@ -37,4 +37,8 @@ void room_join(room_t* room, session_t* s);
 void room_leave(session_t* s);
 void room_broadcast(room_t* room, session_t* sender, packet_t* pkt);
 
+/* metrics API */
+int state_count_active_sessions(void);
+int state_count_active_rooms(void);
+
 #endif
