@@ -4,11 +4,13 @@
 #include "common.h"
 
 // 세션 정보 구조체
+// fd는 더 이상 세션에 저장하지 않음 -> fd<->session_id 매핑은 net.c(net 스레드)만의 관심사
 typedef struct session {
 	int session_id;
-	int fd;
 	int room_id;
 	bool alive;
+	int refcount;           // 세션 수명 관리용 참조 카운트. 0이 될 때만 실제 free() 됨
+	pthread_mutex_t lock;    // refcount / alive를 보호
 
 	char send_buf[SEND_BUF_SIZE];
 	size_t size_len;
@@ -20,17 +22,27 @@ typedef struct room {
 	int room_id;
 	session_t* users[MAX_ROOM_USER];
 	int user_count;
+	bool live;              // false면 이 슬롯은 회수되어 재사용 대기 중(더 이상 유효한 방이 아님)
 	pthread_mutex_t lock;
 } room_t;
 
-/* session API */
-session_t* session_get(int fd);       // 조회만 (생성 X)
-session_t* session_create(int fd);    // 생성만 (없을 때만 생성)
-void session_remove(int fd);
+/*
+* session API (session_id 기반, 참조 카운트로 수명 관리)
+* session_get_by_id()로 얻은 포인터는 다 쓴 뒤 반드시 session_release()로 반환해야 함
+*/
+session_t* session_create(void);
+session_t* session_get_by_id(int session_id);
+void session_acquire(session_t* s);
+void session_release(session_t* s);
+void session_remove_by_id(int session_id);
+bool session_is_alive(session_t* s);
+int session_get_room_id(session_t* s);  /* room_id를 락 보호 하에 안전하게 읽음 */
+int session_deactivate(session_t* s);   /* alive=false로 내리고, 그 순간의 room_id를 원자적으로 함께 반환 */
+void session_remove_all(void);   /* 서버 종료 시 남아있는 모든 세션을 방에서 빼고 정리 */
 
 /* room API */
-room_t* room_get(int room_id);  // 
-room_t* room_create(void);      //     
+room_t* room_get(int room_id);
+room_t* room_create(void);
 room_t* room_find(void);
 
 void room_join(room_t* room, session_t* s);

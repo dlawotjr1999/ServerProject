@@ -52,16 +52,20 @@ void net_wakeup(void) {
 	}
 }
 
-/* fd에 대응하는 네트워크 연결을 완전히 종료하는 함수 */
+/*
+* fd에 대응하는 네트워크 연결을 실제로(close 시스템콜까지) 종료하는 함수
+* net_disconnect()가 즉시 부르는 게 아니라, logic 스레드가 세션 정리를 끝내고
+* JOB_CLOSE로 알려온 시점에만 호출됨 -> 그 전까지는 fd가 계속 열려있어서
+* 커널이 이 fd 번호를 다른 연결에 재할당할 수 없음(fd 재사용 경쟁의 근본 차단)
+*/
 static void close_connection(int fd)
 {
 	connection_t* conn = connections[fd];
 	if (!conn) return;
 
 	/*
-	* epoll 감시 대상 제거
-	* 소켓 종료 후 connection 구조체 메모리 해제
-	* 마지막으로 연결 테이블에서 제거
+	* epoll에서 이미 빠져있겠지만(net_disconnect에서 먼저 제거), 혹시 몰라 한 번 더 시도해도 무해함
+	* 실제 소켓 종료 후 connection 구조체 메모리 해제, 마지막으로 연결 테이블에서 제거
 	*/
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
 	close(fd);
@@ -72,19 +76,25 @@ static void close_connection(int fd)
 }
 
 /*
-* 네트워크 연결 종료 처리 함수
-* 네트워크 리소스 정리 후, 논리적 상태 정리는 워커 스레드에 위임
+* 네트워크 연결 종료를 감지했을 때 호출되는 함수
+* fd를 즉시 close하지 않는 게 핵심: epoll 감시에서만 즉시 빼서 더 이상 이벤트를 받지 않게 하고,
+* 실제 close()는 logic 스레드가 세션/룸 정리를 끝내고 JOB_CLOSE를 보내올 때까지 미룸.
+* 그래야 정리가 끝나기 전에 커널이 이 fd 번호를 새 accept에 재할당하는 일이 없음
 */
 static void net_disconnect(int fd)
 {
 	if (fd < 0 || fd >= MAX_CLIENTS) return;
 
-	/* 네트워크 리소스 정리 */
-	if (connections[fd]) close_connection(fd);
+	connection_t* conn = connections[fd];
+	if (!conn || conn->closing) return;   /* 이미 처리 중이거나 없는 fd면 중복 처리 방지 */
+	conn->closing = true;
+
+	/* epoll 감시에서만 즉시 제거. close()는 아직 하지 않음 */
+	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
 
 	/* 세션 / 룸 상태 정리는 로직 스레드에서 처리하도록 DISCONNECT 작업을 큐에 전달 */
-	job_queue_push_disconnect(&g_logic_q, fd);
-	log_json("INFO", "disconnect_queued", "fd", LOG_ARG_INT, fd, NULL);
+	job_queue_push_disconnect(&g_logic_q, conn->session_id, fd);
+	log_json("INFO", "disconnect_queued", "fd", LOG_ARG_INT, fd, "session_id", LOG_ARG_INT, conn->session_id, NULL);
 
 	/* 연결 종료 지표 누적 (메트릭 노출용) */
 	metrics_inc_disconnects();
@@ -142,15 +152,31 @@ int packet_send(int fd, packet_t* pkt) {
 	return 0;
 }
 
-/* IO 큐에서 전달된 SEND 작업을 처리하는 함수 */
+/*
+* session_id에 지금 대응하는 fd를 찾는 함수 (fd<->session_id 매핑은 net 스레드만 아는 정보이므로 여기서 조회)
+* MAX_CLIENTS(4096)가 크지 않아 선형 탐색으로 충분함(핫 패스인 accept/recv/send 자체는 아님)
+*/
+static int find_fd_by_session_id(int session_id)
+{
+	for (int fd = 0; fd < MAX_CLIENTS; ++fd) {
+		connection_t* conn = connections[fd];
+		if (conn && !conn->closing && conn->session_id == session_id)
+			return fd;
+	}
+	return -1;
+}
+
+/*
+* IO 큐에서 전달된 SEND 작업을 처리하는 함수
+* job은 fd가 아니라 session_id로 대상을 지정하므로, 실제 전송 직전에 그 session_id가
+* 지금 어느 fd에 대응하는지 다시 조회함 -> 그 사이 대상이 끊기고 fd가 재사용됐어도
+* session_id가 더 이상 안 맞으므로 엉뚱한 연결로 잘못 보내지 않고 조용히 스킵됨
+*/
 static void handle_send_job(job_t* job)
 {
-	int fd = job->fd;
-	connection_t* conn = connections[fd];
-
-	/* 이미 끊긴 연결의 경우 조용히 무시 */
-	if (!conn)
-		return;
+	int fd = find_fd_by_session_id(job->session_id);
+	if (fd < 0)
+		return;   /* 대상이 이미 끊겼거나, 다른 세션이 그 fd를 쓰고 있음 */
 
 	/* 패킷 적재 실패 시 연결 종료 */
 	if (packet_send(fd, &job->packet) < 0) {
@@ -408,13 +434,16 @@ void net_run() {
 		}
 
 		/*
-		* IO 큐에 쌓인 SEND 작업 처리
-		* 네트워크 전송은 항상 네트워크 스레드에서 수행
+		* IO 큐에 쌓인 작업 처리 (SEND: 실제 전송, CLOSE: logic 스레드가 정리를 끝낸 fd를 이제 close)
+		* 네트워크 전송/종료는 항상 네트워크 스레드에서 수행
 		*/
 		job_t job;
 		while (job_queue_pop(&g_io_q, &job, JOBQ_NONBLOCK)) {
 			if (job.type == JOB_SEND) {
 				handle_send_job(&job);
+			}
+			else if (job.type == JOB_CLOSE) {
+				close_connection(job.fd);
 			}
 		}
 
@@ -477,7 +506,21 @@ void net_run() {
 					continue;
 				}
 
+				/*
+				* 세션을 accept 즉시 생성함(기존에는 첫 패킷이 올 때까지 지연 생성했음)
+				* disconnect가 패킷 한 번 못 받고 발생해도 job에 실을 session_id가 이미 있어야 하기 때문
+				* fd<->session_id 매핑은 이 connection_t 안에서만 관리하는, net 스레드만의 관심사임
+				*/
+				session_t* s = session_create();
+				if (!s) {
+					free(conn);
+					close(client_fd);
+					continue;
+				}
+
 				conn->fd = client_fd;
+				conn->session_id = s->session_id;
+				conn->closing = false;
 				conn->recv_len = 0;
 				conn->send_len = 0;
 				conn->send_offset = 0;
@@ -488,6 +531,7 @@ void net_run() {
 
 				log_json("INFO", "accept",
 					"fd", LOG_ARG_INT, client_fd,
+					"session_id", LOG_ARG_INT, s->session_id,
 					"ip", LOG_ARG_STR, inet_ntoa(client_addr.sin_addr),
 					"port", LOG_ARG_INT, ntohs(client_addr.sin_port),
 					NULL);
@@ -536,11 +580,8 @@ void net_run() {
 							if (connection_closed)
 								break;
 
-							job.fd = cfd;
-							job.packet = pkt;
-
-							/* 파싱된 패킷을 로직 스레드로 전달 */
-							job_queue_push_packet(&g_logic_q, cfd, &pkt);
+							/* 파싱된 패킷을 로직 스레드로 전달 (fd가 아니라 session_id로 대상을 지정) */
+							job_queue_push_packet(&g_logic_q, conn->session_id, &pkt);
 
 							log_json("INFO", "packet_received",
 								"fd", LOG_ARG_INT, cfd,

@@ -54,10 +54,12 @@ typedef struct {
 
 typedef struct {
 	int fd;
+	int session_id;				// 이 fd가 지금 대응하는 세션의 id (net 스레드가 fd<->session_id 매핑을 직접 관리)
+	bool closing;					// net_disconnect가 같은 fd에 대해 중복 처리되지 않도록 막는 가드
 
 	// recv
 	char recv_buf[RECV_BUF_SIZE];	// 수신 버퍼
-	int recv_len;					// 현재 수신된 버퍼 길이	
+	int recv_len;					// 현재 수신된 버퍼 길이
 
 	// send
 	char send_buf[SEND_BUF_SIZE];	// 송신 버퍼

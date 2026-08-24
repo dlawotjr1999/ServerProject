@@ -75,15 +75,30 @@ int job_queue_depth(job_queue_t* q) {
 /* job 타입별로 필수 필드가 다르므로, 생성 규칙을 한 곳에 모음 */
 /* 또한, job_t의 내부 구조가 바뀌어도(필드 추가/초기화 규칙 변경) helper만 수정하면 됨 */
 
-/* 패킷 수신 이벤트를 job 형태(JOB_PACKET)로 만들어 큐에 삽입 */
-void job_queue_push_packet(job_queue_t* q, int fd, packet_t* pkt) {
-	job_t job = {.type = JOB_PACKET, .fd = fd, .packet = *pkt };
+/* 패킷 수신 이벤트를 job 형태(JOB_PACKET)로 만들어 큐에 삽입. fd가 아니라 session_id로 대상을 지정함 */
+void job_queue_push_packet(job_queue_t* q, int session_id, packet_t* pkt) {
+	job_t job = { .type = JOB_PACKET, .session_id = session_id, .packet = *pkt };
 	job_queue_push(q, &job);
 }
 
-/* 연결 종료 이벤트를 job 형태(JOB_DISCONNECT)로 만들어 큐에 삽입 */
-void job_queue_push_disconnect(job_queue_t* q, int fd) {
-	job_t job = { .type = JOB_DISCONNECT,.fd = fd };
+/*
+* 연결 종료 이벤트를 job 형태(JOB_DISCONNECT)로 만들어 큐에 삽입
+* session_id는 logic 스레드가 세션을 정리할 대상, fd는 그 정리가 끝난 뒤 net 스레드가 close할 대상
+*/
+void job_queue_push_disconnect(job_queue_t* q, int session_id, int fd) {
+	job_t job = { .type = JOB_DISCONNECT, .session_id = session_id, .fd = fd };
+	job_queue_push(q, &job);
+}
+
+/* SEND 작업을 job 형태(JOB_SEND)로 만들어 큐에 삽입. 역시 session_id로 대상을 지정함 */
+void job_queue_push_send(job_queue_t* q, int session_id, packet_t* pkt) {
+	job_t job = { .type = JOB_SEND, .session_id = session_id, .packet = *pkt };
+	job_queue_push(q, &job);
+}
+
+/* logic 스레드가 세션 정리를 끝낸 뒤, net 스레드에게 이 fd를 이제 close해도 된다고 알리는 job */
+void job_queue_push_close(job_queue_t* q, int fd) {
+	job_t job = { .type = JOB_CLOSE, .fd = fd };
 	job_queue_push(q, &job);
 }
 
