@@ -18,15 +18,153 @@ data:
   datasources.yaml: |
     apiVersion: 1
     datasources:
+      # uid를 고정해둠 -> k8s/grafana-dashboards/chat.json이 자동 생성되는 UID에 의존하지 않고
+      # 이 값을 그대로 참조할 수 있어, 클러스터를 다시 만들어도 대시보드가 깨지지 않음
       - name: Prometheus
+        uid: prometheus
         type: prometheus
         access: proxy
         url: http://prometheus:9090
         isDefault: true
       - name: Loki
+        uid: loki
         type: loki
         access: proxy
         url: http://loki:3100
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+data:
+  # Grafana에게 "이 폴더에 있는 JSON들을 대시보드로 자동 로드해라"라고 알려주는 프로비저닝 설정
+  # (대시보드 자체는 UI에서 수동으로 만들지 않고 k8s/grafana-dashboards/chat.json 하나로 재현됨)
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: chat-server
+        folder: ""
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+data:
+  # k8s/grafana-dashboards/chat.json과 동일한 내용
+  # (별도 파일로도 두는 이유: 리뷰/버전관리 시 대시보드 변경사항을 diff로 바로 확인하기 위함)
+  chat.json: |
+    {
+      "title": "Chat Server",
+      "uid": "chat-server",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "timezone": "browser",
+      "time": { "from": "now-15m", "to": "now" },
+      "refresh": "5s",
+      "panels": [
+        {
+          "id": 1,
+          "title": "활성 접속 수",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "chat_connections_active",
+              "legendFormat": "connections",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "thresholds" }, "unit": "none" },
+            "overrides": []
+          }
+        },
+        {
+          "id": 2,
+          "title": "방 수",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "chat_rooms_active",
+              "legendFormat": "rooms",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "thresholds" }, "unit": "none" },
+            "overrides": []
+          }
+        },
+        {
+          "id": 3,
+          "title": "초당 메시지",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 6 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "rate(chat_messages_total[1m])",
+              "legendFormat": "messages/sec",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "reqps" },
+            "overrides": []
+          }
+        },
+        {
+          "id": 4,
+          "title": "Job Queue Depth",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "net -> logic, logic -> net 두 큐의 적체량. 계속 늘어나면 logic worker가 처리 속도를 못 따라간다는 신호 (3단계 스케일아웃 근거)",
+          "gridPos": { "x": 0, "y": 6, "w": 24, "h": 8 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "chat_jobqueue_depth",
+              "legendFormat": "{{queue}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "none" },
+            "overrides": []
+          }
+        },
+        {
+          "id": 5,
+          "title": "에러 로그 스트림",
+          "type": "logs",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "description": "level=ERROR로 찍힌 로그만 필터링 (server/log.c의 log_json 호출 기준)",
+          "gridPos": { "x": 0, "y": 14, "w": 24, "h": 10 },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{app=\"chat-server\"} | json | level=\"ERROR\"",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending"
+          }
+        }
+      ]
+    }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -74,12 +212,22 @@ spec:
           volumeMounts:
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
             - name: data
               mountPath: /var/lib/grafana
       volumes:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
         - name: data
           persistentVolumeClaim:
             claimName: grafana-data
