@@ -1,0 +1,84 @@
+# 채팅 서버 본체: ConfigMap(자리만 마련, 현재는 미사용) + Deployment(replicas=1) + Service
+#
+# replicas=1인 이유: 세션이 fd 기반이라(server/state.c) pod 간 메시지 전달 경로가 없음
+# (2026-08-20-infra-expansion-design.md 참고). 3단계에서 Redis pub/sub 도입 후 늘릴 예정
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-server-config
+data:
+  # 서버 바이너리는 현재 이 값을 컴파일 타임 상수(server/common.h의 PORTNUM/METRICS_PORT)로만 사용하고
+  # 환경변수를 읽지 않음. 지금은 실제로 반영되지 않는 자리이고, 나중에 런타임 설정으로 옮길 때를 위해 둠
+  PORT: "3800"
+  METRICS_PORT: "9100"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-server
+  labels:
+    app: chat-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-server
+  template:
+    metadata:
+      labels:
+        app: chat-server
+      annotations:
+        # Prometheus가 별도 ServiceMonitor 없이 pod annotation만으로 스크레이핑 대상을 찾도록 함
+        # (k8s/prometheus.yaml의 kubernetes_sd_configs relabel_configs와 짝을 이룸)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
+    spec:
+      # kind 클러스터에 `kind load docker-image`로 직접 넣은 로컬 이미지이므로,
+      # 레지스트리에서 당겨오려 시도하지 않도록 Never로 고정
+      containers:
+        - name: chat-server
+          image: chat-server:dev
+          imagePullPolicy: Never
+          ports:
+            - name: chat
+              containerPort: 3800
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            - configMapRef:
+                name: chat-server-config
+          # liveness: 이 경로가 응답한다는 것 자체가 net 스레드 생존의 증거(server/net.c handle_metrics_accept)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          # readiness: net_init()이 리스닝 소켓 bind까지 마쳐야 g_net_ready가 true가 됨(0단계 #2와 직결)
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9100
+            initialDelaySeconds: 1
+            periodSeconds: 3
+      # pod 삭제 시 SIGTERM 이후 이만큼 기다렸다가 SIGKILL함
+      # main.c의 graceful shutdown(0단계 #3, worker 4개 pthread_join)이 끝날 시간을 충분히 확보
+      terminationGracePeriodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-server
+  labels:
+    app: chat-server
+spec:
+  selector:
+    app: chat-server
+  ports:
+    - name: chat
+      port: 3800
+      targetPort: 3800
+    - name: metrics
+      port: 9100
+      targetPort: 9100

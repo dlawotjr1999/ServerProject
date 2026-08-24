@@ -1,0 +1,6 @@
+# 로컬 kind 클러스터 정의. 비용 0으로 전체 인프라를 재현하기 위한 최소 구성(단일 노드)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: chat-server
+nodes:
+  - role: control-plane
