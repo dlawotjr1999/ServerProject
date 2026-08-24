@@ -13,6 +13,9 @@ static int metrics_listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
 
+/* net_init()이 리스닝 소켓 bind까지 전부 성공했는지 나타내는 플래그(readiness probe용) */
+static volatile bool g_net_ready = false;
+
 /* fd -> connection 객체 매핑 테이블 */
 static connection_t* connections[MAX_CLIENTS];
 
@@ -203,9 +206,18 @@ static void handle_metrics_accept(void)
 		status_line = "200 OK";
 	}
 	else if (strncmp(req, "GET /readyz ", 12) == 0) {
-		/* readiness: 지금은 고정 OK. 1-4에서 net_init의 실제 bind 성공 여부를 반영하도록 교체 예정 */
-		body_len = snprintf(body, sizeof(body), "ok\n");
-		status_line = "200 OK";
+		/*
+		* readiness: net_init()에서 리스닝 소켓 bind까지 전부 성공해야 g_net_ready가 true가 됨
+		* k8s가 이 값을 보고 아직 준비 안 된 pod로 트래픽을 보내지 않도록 함
+		*/
+		if (g_net_ready) {
+			body_len = snprintf(body, sizeof(body), "ok\n");
+			status_line = "200 OK";
+		}
+		else {
+			body_len = snprintf(body, sizeof(body), "not ready\n");
+			status_line = "503 Service Unavailable";
+		}
 	}
 	else {
 		body_len = snprintf(body, sizeof(body), "not found\n");
@@ -349,6 +361,9 @@ int net_init() {
 	ev.events = EPOLLIN;
 	ev.data.fd = metrics_listen_fd;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, metrics_listen_fd, &ev);
+
+	/* 채팅용/메트릭용 리스닝 소켓이 모두 bind에 성공했으므로 이 시점부터 준비 완료로 표시 */
+	g_net_ready = true;
 
 	/* 서버 초기화 완료 */
 	log_json("INFO", "server_started", "port", LOG_ARG_INT, PORTNUM, "metrics_port", LOG_ARG_INT, METRICS_PORT, NULL);
