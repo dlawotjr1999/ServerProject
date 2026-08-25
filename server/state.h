@@ -3,14 +3,18 @@
 
 #include "common.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // 세션 정보 구조체
 // fd는 더 이상 세션에 저장하지 않음 -> fd<->session_id 매핑은 net.c(net 스레드)만의 관심사
+// refcount 필드는 없음 -> state.cpp 내부에서 std::shared_ptr가 대신 관리함(REDESIGN.md 참고)
 typedef struct session {
 	int session_id;
 	int room_id;
 	bool alive;
-	int refcount;           // 세션 수명 관리용 참조 카운트. 0이 될 때만 실제 free() 됨
-	pthread_mutex_t lock;    // refcount / alive를 보호
+	pthread_mutex_t lock;    // alive / room_id 접근을 보호
 
 	char send_buf[SEND_BUF_SIZE];
 	size_t size_len;
@@ -27,8 +31,10 @@ typedef struct room {
 } room_t;
 
 /*
-* session API (session_id 기반, 참조 카운트로 수명 관리)
+* session API (session_id 기반, shared_ptr로 수명 관리)
 * session_get_by_id()로 얻은 포인터는 다 쓴 뒤 반드시 session_release()로 반환해야 함
+* (C 콜사이트는 shared_ptr을 직접 못 들고 있으므로, 이 pair가 내부적으로 shared_ptr 사본의
+* 생성/소멸을 대신 수행함 -> state.cpp 참고)
 */
 session_t* session_create(void);
 session_t* session_get_by_id(int session_id);
@@ -52,5 +58,9 @@ void room_broadcast(room_t* room, session_t* sender, packet_t* pkt);
 /* metrics API */
 int state_count_active_sessions(void);
 int state_count_active_rooms(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

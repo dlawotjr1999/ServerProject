@@ -1,9 +1,10 @@
 #include "log.h"
+#include "posix_lock.hpp"
 
-#include <stdio.h>
-#include <stdarg.h>
-#include <string.h>
-#include <time.h>
+#include <cstdio>
+#include <cstring>
+#include <cstdarg>
+#include <ctime>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -49,6 +50,8 @@ static int json_escape(char* dst, size_t dst_size, const char* src)
 * level/event 및 가변 key-value 필드를 한 줄 JSON으로 직렬화해 stdout에 쓰는 로깅 단일 진입점
 * 여러 스레드가 동시에 호출하므로, 완성된 한 줄 전체를 하나의 write() 호출로 내보내야
 * 컨테이너 로그 수집기에서 서로 다른 스레드의 로그 줄이 섞이지 않음
+*
+* net.c/logic.c/main.c(순수 C)가 그대로 호출해야 하므로 C 가변인자(...) 시그니처는 유지함(log.h 참고)
 */
 void log_json(const char* level, const char* event, ...)
 {
@@ -56,7 +59,7 @@ void log_json(const char* level, const char* event, ...)
 	int len;
 
 	/* 로그 시각은 호출부가 매번 넘기지 않도록 이 함수 안에서 UTC로 직접 생성함 */
-	time_t now = time(NULL);
+	time_t now = time(nullptr);
 	struct tm tm_utc;
 	gmtime_r(&now, &tm_utc);
 	char ts[32];
@@ -108,8 +111,7 @@ void log_json(const char* level, const char* event, ...)
 	* 완성된 한 줄 전체를 락으로 보호된 상태에서 단일 write()로 출력
 	* fprintf처럼 여러 번 나눠 쓰면 중간에 다른 스레드의 출력이 끼어들어 줄이 섞일 수 있음
 	*/
-	pthread_mutex_lock(&g_log_lock);
+	PosixLockGuard lock(g_log_lock);
 	ssize_t written = write(STDOUT_FILENO, buf, (size_t)len);
 	(void)written; /* 로그 출력 실패는 무시(로깅 자체가 서버 로직에 영향을 주면 안 됨) */
-	pthread_mutex_unlock(&g_log_lock);
 }
