@@ -7,6 +7,7 @@
 #include "net.h"
 #include "logic.h"
 #include "job_queue.h"
+#include "state.h"
 
 /*
 * g_logic_q : net -> logic(수신 패킷/끊김/종료 같은 "이벤트 전달")
@@ -40,6 +41,9 @@ int main() {
 	/* 스레드 간 작업 큐 초기화 */
 	job_queue_init(&g_logic_q);
 	job_queue_init(&g_io_q);
+
+	/* 방 슬롯의 뮤텍스를 미리 전부 초기화 (3단계) - worker가 방을 건드리기 전에 끝나야 함 */
+	state_init();
 
 	/*
 	* 로직 worker thread 생성
