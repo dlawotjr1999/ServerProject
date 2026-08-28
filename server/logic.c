@@ -3,6 +3,7 @@
 #include "state.h"
 #include "log.h"
 #include "metrics.h"
+#include "redis_client.h"
 #include <stdio.h>
 
 extern job_queue_t g_logic_q;
@@ -69,6 +70,15 @@ void* worker_thread(void* arg)
 		}
 
 		/*
+		* Redis pub/sub으로 도착한 채팅 메시지를 이 pod의 로컬 멤버에게 전달 (3단계)
+		* job.room_id: 대상 방, job.session_id: 배송에서 제외할 원 발신자(재사용된 필드)
+		*/
+		case JOB_ROOM_DELIVER: {
+			room_broadcast_local(job.room_id, job.session_id, &job.packet);
+			break;
+		}
+
+		/*
 		* 정상 종료 처리
 		* 모든 세션을 순회하며 방에서 제거 후 세션 정리
 		* 정리 완료 후 worker thread 종료
@@ -101,9 +111,25 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		if (session_get_room_id(s) >= 0)
 			break;
 
-		room_t* r = room_find();
-		if (!r) r = room_create();
-		room_join(r, s);
+		/* 매치메이킹(빈 방 찾기/생성)은 Redis가 클러스터 전역으로 원자적으로 처리함 (3단계) */
+		int room_id;
+		if (redis_join_room(s->session_id, &room_id) != 0) {
+			log_json("ERROR", "redis_join_failed", "session_id", LOG_ARG_INT, s->session_id, NULL);
+			break;
+		}
+
+		room_t* r = room_get_or_init(room_id);
+		if (!r) {
+			log_json("ERROR", "room_init_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			break;
+		}
+
+		/* 이 pod에서 이 방에 로컬 멤버가 처음 생긴 경우에만 Redis 채널 구독을 시작함 */
+		bool first_local_member = room_join(r, s);
+		if (first_local_member) {
+			job_queue_push_redis_subscribe(&g_io_q, room_id);
+			net_wakeup();
+		}
 		break;
 	}
 
@@ -117,12 +143,29 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		if (room_id < 0)
 			break;
 
-		room_t* r = room_get(room_id);
-		if (!r)
-			break;
-		room_broadcast(r, s, pkt);
+		/*
+		* 3단계: payload를 여기서 한 번만 재포맷(개행 추가 + 길이 재계산)해서 발행한다.
+		* 수신 측(room_broadcast_local)은 재포맷 없이 그대로 전달만 하므로 모든 pod가 같은 바이트를 봄
+		* (기존 state.c의 room_broadcast가 하던 포맷팅 로직을 그대로 옮겨온 것)
+		*/
+		int payload_len = (int)pkt->length - 2;
+		if (payload_len <= 0) break;
+		if (payload_len > MAX_PACKET_SIZE) payload_len = MAX_PACKET_SIZE;
 
-		/* 브로드캐스트된 채팅 메시지 수 누적 (메트릭 노출용) */
+		packet_t out;
+		memset(&out, 0, sizeof(out));
+		int n = snprintf(out.payload, MAX_PACKET_SIZE, "%.*s\n", payload_len, pkt->payload);
+		if (n <= 0 || n >= MAX_PACKET_SIZE)
+			break;
+		out.type = PKT_CHAT;
+		out.length = 2 + (uint16_t)n;
+
+		if (redis_publish_chat(room_id, s->session_id, &out) != 0) {
+			log_json("ERROR", "redis_publish_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			break;
+		}
+
+		/* 발행 성공 시점에 카운트 (기존과 달리 "실제 배송 성공"이 아니라 "발행 성공" 기준으로 의미가 약간 바뀜) */
 		metrics_inc_messages();
 		break;
 	}
