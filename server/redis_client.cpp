@@ -244,6 +244,11 @@ int redis_sub_read(int* out_room_id, int* out_except_id, packet_t* out_pkt)
 			memcpy(&type, buf + sizeof(int), sizeof(uint16_t));
 			memcpy(&plen, buf + sizeof(int) + sizeof(uint16_t), sizeof(uint16_t));
 
+			if (plen < 2) {
+				freeReplyObject(reply);
+				return 0;   /* 손상된 메시지는 조용히 버림 - 정상 메시지가 아니므로 배송 실패로 취급하지 않음 */
+			}
+
 			size_t payload_bytes = (size_t)plen - 2;
 			if (payload_bytes > MAX_PACKET_SIZE) payload_bytes = MAX_PACKET_SIZE;
 
