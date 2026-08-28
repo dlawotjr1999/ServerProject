@@ -74,7 +74,12 @@ int redis_client_init(const char* host, int port)
 		return -1;
 	}
 
-	g_redis_sub = redisConnect(host, port);
+	/* redisConnect()(블로킹) + fcntl로 fd만 논블로킹으로 바꾸면 hiredis 내부의
+	* REDIS_BLOCK 플래그가 그대로 남아있어, redisBufferRead()가 EAGAIN을 정상적인
+	* "아직 읽을 데이터 없음"이 아니라 진짜 I/O 에러로 취급해버린다(매 폴링마다
+	* redis_sub_read_error 오탐 발생). redisConnectNonBlock()은 애초에 REDIS_BLOCK
+	* 플래그 없이 컨텍스트를 만들어주는 hiredis의 표준 논블로킹 커넥터라 이 문제가 없다 */
+	g_redis_sub = redisConnectNonBlock(host, port);
 	if (!g_redis_sub || g_redis_sub->err) {
 		log_json("ERROR", "redis_connect_failed", "which", LOG_ARG_STR, "sub", NULL);
 		return -1;
