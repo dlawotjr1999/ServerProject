@@ -7,6 +7,7 @@
 #include "state.h"
 #include "log.h"
 #include "metrics.h"
+#include "redis_client.h"
 
 static int listen_fd = -1;
 static int metrics_listen_fd = -1;
@@ -388,6 +389,20 @@ int net_init() {
 	ev.data.fd = metrics_listen_fd;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, metrics_listen_fd, &ev);
 
+	/*
+	* Redis 연결(명령용 + 구독용) 초기화 (3단계)
+	* net_init()의 다른 실패 경로와 동일하게, 실패하면 -1을 반환해 서버가 즉시 종료되게 함
+	*/
+	if (redis_client_init(REDIS_HOST, REDIS_PORT) < 0) {
+		fprintf(stderr, "redis_client_init failed\n");
+		return -1;
+	}
+
+	/* 구독 전용 연결의 fd를 같은 epoll 인스턴스에 등록 - metrics_listen_fd와 동일한 패턴 */
+	ev.events = EPOLLIN;
+	ev.data.fd = redis_client_sub_fd();
+	epoll_ctl(epfd, EPOLL_CTL_ADD, redis_client_sub_fd(), &ev);
+
 	/* 채팅용/메트릭용 리스닝 소켓이 모두 bind에 성공했으므로 이 시점부터 준비 완료로 표시 */
 	g_net_ready = true;
 
@@ -445,6 +460,12 @@ void net_run() {
 			else if (job.type == JOB_CLOSE) {
 				close_connection(job.fd);
 			}
+			else if (job.type == JOB_REDIS_SUBSCRIBE) {
+				redis_subscribe_room(job.room_id);
+			}
+			else if (job.type == JOB_REDIS_UNSUBSCRIBE) {
+				redis_unsubscribe_room(job.room_id);
+			}
 		}
 
 		/* epoll로 전달된 각 이벤트 처리 */
@@ -465,6 +486,20 @@ void net_run() {
 			/* 메트릭/헬스체크 스크레이퍼 연결 처리 (채팅 연결과 다른 경로이므로 이후 로직으로 흘러가지 않도록 continue) */
 			if (fd == metrics_listen_fd) {
 				handle_metrics_accept();
+				continue;
+			}
+
+			/* Redis 구독 연결에 pub/sub 메시지가 도착 (3단계) - 완전한 메시지를 전부 소진할 때까지 반복 */
+			if (fd == redis_client_sub_fd()) {
+				int room_id, except_id;
+				packet_t pkt;
+				int rc;
+				while ((rc = redis_sub_read(&room_id, &except_id, &pkt)) == 1) {
+					job_queue_push_room_deliver(&g_logic_q, room_id, except_id, &pkt);
+				}
+				if (rc < 0) {
+					log_json("ERROR", "redis_sub_read_error", NULL);
+				}
 				continue;
 			}
 
@@ -657,6 +692,7 @@ void net_run() {
 		close(metrics_listen_fd);
 		metrics_listen_fd = -1;
 	}
+	redis_client_shutdown();
 
 	/* 모든 연결 정리 */
 	for (int fd = 0; fd < MAX_CLIENTS; fd++) {
