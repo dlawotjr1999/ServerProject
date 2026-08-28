@@ -7,12 +7,12 @@
 #include <cstdio>
 #include <memory>
 #include <unordered_map>
-#include <vector>
 
 /* net.c/main.c(순수 C)에 정의된 심볼이라 C 링키지로 선언해야 링크가 됨 */
 extern "C" {
 	extern job_queue_t g_io_q;
 	void net_wakeup(void);
+	int redis_leave_room(int session_id, int room_id);   /* redis_client.cpp (3단계) */
 }
 
 /*
@@ -32,12 +32,27 @@ static std::unordered_multimap<session_t*, std::shared_ptr<session_t>> g_extra_r
 static int next_session_id = 1;
 static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* 방 관련 데이터. rooms 배열 자체는 그대로 고정 배열(세션과 달리 방은 raw pointer를 오래 들고 있지 않고
-* 매번 room_get()으로 다시 조회하므로 shared_ptr이 필요 없음). free list만 std::vector로 교체 */
+/*
+* 방 관련 데이터. rooms 배열 자체는 그대로 고정 배열(세션과 달리 방은 raw pointer를 오래 들고 있지 않고
+* 매번 room_get()으로 다시 조회하므로 shared_ptr이 필요 없음).
+* 3단계: 어느 room_id가 비어있는지/누가 다음 채번인지는 이제 Redis가 클러스터 전역으로 관리하므로,
+* 로컬 room_count/room_free_list는 제거하고 MAX_ROOMS개 슬롯을 state_init()에서 한 번에 초기화한다
+*/
 static room_t rooms[MAX_ROOMS];
-static int room_count = 0;
-static std::vector<int> room_free_list;
 static pthread_mutex_t g_rooms_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* 서버 시작 시 1회 호출 - 모든 방 슬롯의 뮤텍스를 미리 초기화해둔다(3단계 이전처럼 방 생성 시점에
+* 지연 초기화하지 않음 - Redis가 이미 정해준 room_id가 로컬에서 처음 쓰일 때 곧바로 락을 잡아야 하므로) */
+void state_init(void)
+{
+	for (int i = 0; i < MAX_ROOMS; ++i) {
+		memset(&rooms[i], 0, sizeof(rooms[i]));
+		pthread_mutex_init(&rooms[i].lock, nullptr);
+		rooms[i].room_id = i;
+		rooms[i].live = false;
+	}
+	log_json("INFO", "state_initialized", "max_rooms", LOG_ARG_INT, MAX_ROOMS, NULL);
+}
 
 /* g_sessions_lock을 이미 쥔 상태에서, raw pointer에 대응하는 shared_ptr 사본을 하나 더 만들어 등록 */
 static void add_extra_ref_locked(session_t* s)
@@ -214,106 +229,52 @@ void session_remove_all(void)
 
 /* ============================ Room ============================ */
 
-/*
-* 방을 생성하는 함수
-* 반납된(비어서 회수된) 슬롯이 있으면 그걸 먼저 재사용하고, 없으면 새 슬롯을 씀
-*/
-room_t* room_create(void)
-{
-	int idx;
-	bool reused;
-
-	{
-		PosixLockGuard lock(g_rooms_lock);
-
-		if (!room_free_list.empty()) {
-			idx = room_free_list.back();
-			room_free_list.pop_back();
-			reused = true;
-		}
-		else if (room_count < MAX_ROOMS) {
-			idx = room_count++;
-			reused = false;
-		}
-		else {
-			return nullptr;
-		}
-
-		room_t* r = &rooms[idx];
-		if (reused) {
-			/*
-			* 이 슬롯의 mutex는 이전 생애주기에서 이미 init된 채로 계속 살아있으므로 그대로 재사용함
-			* (destroy 후 재init하면, 그 사이 다른 스레드가 마침 이 mutex를 lock하려던 참이었을 경우와
-			* 경쟁할 위험이 있어 destroy 자체를 하지 않는 쪽을 택함 - 파괴하지 않는 대신 필드만 초기화)
-			*
-			* users[]/user_count는 room->lock으로 보호되는 필드라서(room_join/room_leave/room_broadcast가
-			* 그렇게 접근함), 여기서도 room->lock을 잡고 초기화해야 함
-			*/
-			PosixLockGuard room_lock(r->lock);
-			memset(r->users, 0, sizeof(r->users));
-			r->user_count = 0;
-		}
-		else {
-			memset(r, 0, sizeof(*r));
-			pthread_mutex_init(&r->lock, nullptr);
-		}
-		r->room_id = idx;
-		r->live = true;
-	} /* g_rooms_lock 해제 */
-
-	log_json("INFO", "room_created", "room_id", LOG_ARG_INT, idx, "reused", LOG_ARG_INT, reused ? 1 : 0, NULL);
-	return &rooms[idx];
-}
-
-/* 방 정보를 가져오는 함수 */
+/* 방 정보를 가져오는 함수 (3단계: room_count 없이 MAX_ROOMS 고정 상한으로 검사) */
 room_t* room_get(int room_id)
 {
-	int max;
-	{
-		PosixLockGuard lock(g_rooms_lock);
-		max = room_count;
-	}
+	if (room_id < 0 || room_id >= MAX_ROOMS) return nullptr;
 
-	if (room_id < 0 || room_id >= max)
-		return nullptr;
-
+	PosixLockGuard lock(g_rooms_lock);
+	if (!rooms[room_id].live) return nullptr;
 	return &rooms[room_id];
 }
 
-/* 방을 조회하는 함수 (인원 여유가 있는 살아있는 방 하나를 찾음) */
-room_t* room_find(void)
+/*
+* Redis가 배정한 room_id에 대해 로컬 슬롯을 준비하는 함수 (3단계)
+* 매치메이킹 정책(누구를 어디로 배정할지)은 이제 Redis가 결정하므로, 이 함수는 정책 결정 없이
+* 주어진 room_id의 로컬 자리를 살아있는 상태로 만들기만 한다
+*/
+room_t* room_get_or_init(int room_id)
 {
+	if (room_id < 0 || room_id >= MAX_ROOMS) return nullptr;
+
 	PosixLockGuard lock(g_rooms_lock);
-
-	for (int i = 0; i < room_count; i++) {
-		if (!rooms[i].live) continue;
-
-		/* user_count는 room->lock으로 보호되는 필드이므로, g_rooms_lock만으로 읽으면 안 됨 */
-		PosixLockGuard room_lock(rooms[i].lock);
-		if (rooms[i].user_count < MAX_ROOM_USER) {
-			return &rooms[i];
-		}
+	room_t* r = &rooms[room_id];
+	if (!r->live) {
+		PosixLockGuard room_lock(r->lock);
+		memset(r->users, 0, sizeof(r->users));
+		r->user_count = 0;
+		r->room_id = room_id;
+		r->live = true;
 	}
-	return nullptr;
+	return r;
 }
 
 /*
-* 방에 입장하는 함수
-* room_find/room_create가 반환한 포인터를 받아 쓰는 시점 사이에 그 방이 다른 스레드에 의해
-* 회수됐을 수 있으므로, 실제로 인원을 추가하기 직전에 g_rooms_lock 하에 live를 한 번 더 확인함
-*
-* "정말로 추가해도 되는지(alive)"와 "실제로 추가 + room_id 기록"을 s->lock 하나의 구간으로 묶어서,
-* session_deactivate()(disconnect 처리)와 어느 쪽이 먼저 실행되든 항상 일관된 결과가 나오게 함
+* 방에 입장하는 함수 (기존 락 순서/원자성 보장은 그대로 유지)
+* 3단계: 반환값이 추가됨 - 이 입장으로 로컬 인원이 0->1이 됐으면 true(이 pod에서 이 방에 대한
+* 관심이 방금 처음 생겼다는 뜻 -> 호출부(logic.c)가 Redis 구독을 새로 시작해야 함)
 */
-void room_join(room_t* room, session_t* s)
+bool room_join(room_t* room, session_t* s)
 {
-	if (!room || !s) return;
+	if (!room || !s) return false;
 
 	bool joined = false;
-	int joined_room_id = -1;   /* room->room_id를 락 해제 후에 다시 읽지 않기 위해 락 안에서 로컬로 캡처 */
+	bool first_local_member = false;
+	int joined_room_id = -1;
 	{
 		PosixLockGuard rooms_lock(g_rooms_lock);
-		if (!room->live) return;
+		if (!room->live) return false;
 
 		PosixLockGuard room_lock(room->lock);
 		PosixLockGuard session_lock(s->lock);
@@ -329,25 +290,22 @@ void room_join(room_t* room, session_t* s)
 				s->room_id = room->room_id;
 				joined = true;
 				joined_room_id = room->room_id;
+				first_local_member = (room->user_count == 1);
 			}
 		}
-	} /* session_lock -> room_lock -> rooms_lock 역순으로 전부 해제.
-	   * 이 시점부터는 room이 가리키던 슬롯이 다른 스레드에 의해 재사용/파괴될 수 있으므로
-	   * room->room_id를 다시 읽으면 안 됨 - 위에서 캡처해둔 joined_room_id만 사용 */
+	}
 
 	if (joined) {
-		log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, joined_room_id, NULL);
+		log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, joined_room_id, "first_local_member", LOG_ARG_INT, first_local_member ? 1 : 0, NULL);
 	}
+	return first_local_member;
 }
 
 /*
-* 방에서 떠나는 함수
-* room_id는 s->lock 하에 읽고, 마지막에 -1로 되돌리는 것도 s->lock 하에 함
-* (room_join도 room_id를 s->lock 아래서 설정하므로, 이렇게 해야 둘 사이의 순서가 항상 일관되게 결정됨)
-*
-* 인원이 0이 되면 그 자리에서(g_rooms_lock을 쥔 채로) live를 내리고 free list에 반납함
-* -> 방금 인원이 빠져 0이 됐는지 확인하는 시점과 반납하는 시점 사이에 다른 스레드가
-*    room_join으로 끼어드는 걸 막기 위해, 판단과 반납을 하나의 g_rooms_lock 구간 안에서 함께 처리함
+* 방에서 떠나는 함수 (기존 락 순서/원자성 보장은 그대로 유지)
+* 3단계: 로컬 정리 후 Redis 쪽 인원 카운트도 -1 한다(Redis가 회수/freelist 반납을 대신 처리).
+* 이 pod의 로컬 인원이 0이 되면(다른 pod에는 아직 인원이 남아있을 수 있음) 구독을 끊어달라는
+* job을 net 스레드에 전달한다
 */
 void room_leave(session_t* s)
 {
@@ -361,13 +319,12 @@ void room_leave(session_t* s)
 	if (room_id < 0 || room_id >= MAX_ROOMS) return;
 
 	bool did_leave = false;
-	bool now_empty = false;
+	bool now_empty_local = false;
 	{
 		PosixLockGuard rooms_lock(g_rooms_lock);
 		room_t* room = &rooms[room_id];
 
 		if (!room->live) {
-			/* 이미 회수된 방이면 세션의 소속 정보만 정리 */
 			PosixLockGuard session_lock(s->lock);
 			if (s->room_id == room_id) s->room_id = -1;
 			return;
@@ -385,12 +342,11 @@ void room_leave(session_t* s)
 			}
 		}
 
-		now_empty = (room->user_count == 0);
-		if (now_empty) {
+		now_empty_local = (room->user_count == 0);
+		if (now_empty_local) {
 			room->live = false;
-			room_free_list.push_back(room_id);
 		}
-	} /* room_lock, rooms_lock 해제 */
+	}
 
 	{
 		PosixLockGuard session_lock(s->lock);
@@ -398,24 +354,35 @@ void room_leave(session_t* s)
 	}
 
 	if (did_leave) {
-		log_json("INFO", "room_left", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, "reclaimed", LOG_ARG_INT, now_empty ? 1 : 0, NULL);
+		redis_leave_room(s->session_id, room_id);
+
+		log_json("INFO", "room_left", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, "local_empty", LOG_ARG_INT, now_empty_local ? 1 : 0, NULL);
+
+		if (now_empty_local) {
+			job_queue_push_redis_unsubscribe(&g_io_q, room_id);
+			net_wakeup();
+		}
 	}
 }
 
-/* 방에 채팅을 전파하는 함수 */
-void room_broadcast(room_t* room, session_t* sender, packet_t* pkt)
+/*
+* 방에 채팅을 전파하는 함수 (3단계: id 기반으로 변경)
+* Redis pub/sub을 거쳐 이 pod에 도착한 메시지를 로컬 멤버에게만 전달한다.
+* 포맷팅(개행 추가 등)은 이미 발행 시점(logic.c)에 끝났으므로 pkt을 그대로 재사용한다 ->
+* 그래야 모든 pod가 같은 바이트를 배송함
+*/
+void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt)
 {
-	if (!room || !pkt) return;
+	if (!pkt) return;
+	room_t* room = room_get(room_id);
+	if (!room) return;
 
 	/*
 	* 전송 대상 session_id 목록을 임시로 저장 (fd가 아님!)
 	* room->lock을 잡은 상태에서 직접 send하지 않기 위해 사용
-	* 실제 fd는 net 스레드가 SEND 작업을 처리하는 시점에 session_id로 다시 조회함 ->
-	* 그 사이 대상이 끊기고 그 fd가 다른 사람 것이 됐어도 엉뚱한 곳으로 보내지 않음
 	*/
 	int target_ids[MAX_ROOM_USER];
 	int count = 0;
-	int except_id = sender ? sender->session_id : -1;
 
 	{
 		PosixLockGuard lock(room->lock);
@@ -423,34 +390,16 @@ void room_broadcast(room_t* room, session_t* sender, packet_t* pkt)
 			session_t* s = room->users[i];
 			if (!s) continue;
 			if (!session_is_alive(s)) continue;
-			if (s->session_id == except_id) continue;
+			if (s->session_id == except_session_id) continue;
 			target_ids[count++] = s->session_id;
 		}
 	}
 
-	/*
-	* pkt->length는 (type + payload)의 길이
-	* payload의 길이가 최대 패킷길이보다 긴 경우 최대 패킷길이로 고정
-	*/
-	int payload_len = (int)pkt->length - 2;
-	if (payload_len <= 0) return;
-	if (payload_len > MAX_PACKET_SIZE) payload_len = MAX_PACKET_SIZE;
-
-	packet_t out;
-	memset(&out, 0, sizeof(out));
-
-	int n = snprintf(out.payload, MAX_PACKET_SIZE, "%.*s\n", payload_len, pkt->payload);
-	if (n <= 0 || n >= MAX_PACKET_SIZE)
-		return;
-
-	out.type = PKT_CHAT;
-	out.length = 2 + (uint16_t)n;
-
 	for (int i = 0; i < count; ++i) {
-		job_queue_push_send(&g_io_q, target_ids[i], &out);
+		job_queue_push_send(&g_io_q, target_ids[i], pkt);
 	}
 
-	net_wakeup();
+	if (count > 0) net_wakeup();
 }
 
 /* ============================ Metrics ============================ */
@@ -468,7 +417,7 @@ int state_count_active_rooms(void)
 	PosixLockGuard lock(g_rooms_lock);
 
 	int count = 0;
-	for (int i = 0; i < room_count; ++i) {
+	for (int i = 0; i < MAX_ROOMS; ++i) {
 		if (!rooms[i].live) continue;
 		PosixLockGuard room_lock(rooms[i].lock);
 		if (rooms[i].user_count > 0) count++;

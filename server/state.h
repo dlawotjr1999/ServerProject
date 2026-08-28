@@ -47,13 +47,13 @@ int session_deactivate(session_t* s);   /* alive=false로 내리고, 그 순간�
 void session_remove_all(void);   /* 서버 종료 시 남아있는 모든 세션을 방에서 빼고 정리 */
 
 /* room API */
+void state_init(void);   /* 서버 시작 시 1회 호출 - 방 슬롯의 뮤텍스를 미리 전부 초기화 (3단계) */
 room_t* room_get(int room_id);
-room_t* room_create(void);
-room_t* room_find(void);
+room_t* room_get_or_init(int room_id);   /* Redis가 배정한 room_id에 대해 로컬 슬롯을 준비 (3단계) */
 
-void room_join(room_t* room, session_t* s);
+bool room_join(room_t* room, session_t* s);   /* 반환값: 이 입장으로 로컬 인원이 0->1이 됐으면 true */
 void room_leave(session_t* s);
-void room_broadcast(room_t* room, session_t* sender, packet_t* pkt);
+void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt);   /* 3단계: id 기반, 로컬 전달만 담당 */
 
 /* metrics API */
 int state_count_active_sessions(void);
