@@ -59,6 +59,10 @@ typedef struct {
 
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
+/* job_queue_push()와 달리 큐가 가득 차도 절대 블록하지 않는다 - 가득 찼으면 즉시 -1을 반환하고
+* 아무것도 넣지 않는다. 호출자가 락을 쥔 채로 push해야 해서 블로킹이 데드락으로 이어질 수 있는
+* 상황(예: room_leave가 g_rooms_lock을 쥔 채로 이 큐에 push하는 경우)에 쓴다. 성공하면 0 반환 */
+int job_queue_try_push(job_queue_t* q, job_t* job);
 int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode);
 int job_queue_depth(job_queue_t* q);
 
@@ -68,7 +72,9 @@ void job_queue_push_send(job_queue_t* q, int session_id, packet_t* pkt);
 void job_queue_push_close(job_queue_t* q, int fd);
 void job_queue_push_shutdown(job_queue_t* q);
 void job_queue_push_redis_subscribe(job_queue_t* q, int room_id);
-void job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id);
+/* room_leave()가 g_rooms_lock을 쥔 채로 호출하므로 non-blocking(job_queue_try_push)으로 push한다.
+* 0이면 push 성공, -1이면 큐가 가득 차서 드롭됐음을 뜻함(호출자가 로그만 남기고 넘어가면 됨) */
+int job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id);
 void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt);
 
 #ifdef __cplusplus

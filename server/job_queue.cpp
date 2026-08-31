@@ -39,6 +39,23 @@ void job_queue_push(job_queue_t* q, job_t* job) {
 	/* 락 해제는 lock의 소멸자(스코프 종료)가 자동으로 처리 */
 }
 
+/* job_queue_push()와 달리 큐가 가득 차도 절대 블록하지 않고 즉시 실패(-1)를 반환하는 non-blocking push.
+* 호출자가 이미 다른 락(예: g_rooms_lock)을 쥔 채로 이 큐에 push해야 해서, 블로킹이 그 락을 필요로
+* 하는 다른 스레드(예: net 스레드의 /metrics 처리)와 맞물려 데드락으로 이어질 수 있는 상황에 쓴다 */
+int job_queue_try_push(job_queue_t* q, job_t* job) {
+	PosixLockGuard lock(q->mutex);
+
+	if (q->count == JOB_QUEUE_SIZE)
+		return -1;   /* 블록하지 않고 즉시 실패 반환 */
+
+	q->jobs[q->tail] = *job;
+	q->tail = (q->tail + 1) % JOB_QUEUE_SIZE;
+	q->count++;
+
+	pthread_cond_signal(&q->cond);
+	return 0;
+}
+
 /* job 하나를 pop하는 함수 */
 int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode) {
 	PosixLockGuard lock(q->mutex);
@@ -126,12 +143,16 @@ void job_queue_push_redis_subscribe(job_queue_t* q, int room_id) {
 	job_queue_push(q, &job);
 }
 
-/* net 스레드에게 room_id 채널 구독을 중단하라는 job (3단계, logic -> net) */
-void job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id) {
+/*
+* net 스레드에게 room_id 채널 구독을 중단하라는 job (3단계, logic -> net)
+* room_leave()가 g_rooms_lock을 쥔 채로 호출하므로 non-blocking(job_queue_try_push)을 쓴다.
+* 0이면 push 성공, -1이면 큐가 가득 차서 드롭됐음(호출자가 로그만 남기고 넘어감 - no retry)
+*/
+int job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id) {
 	job_t job{};
 	job.type = JOB_REDIS_UNSUBSCRIBE;
 	job.room_id = room_id;
-	job_queue_push(q, &job);
+	return job_queue_try_push(q, &job);
 }
 
 /*

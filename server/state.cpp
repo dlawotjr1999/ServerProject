@@ -364,10 +364,24 @@ void room_leave(session_t* s)
 		* 멤버가 있는 방을 이 pod만 조용히 못 듣게 된다(에러 로그도 남지 않음).
 		* 락 순서: g_io_q 내부 뮤텍스는 g_rooms_lock/room->lock 아래의 leaf다(job_queue_push는 큐
 		* 뮤텍스만 잡고, 큐를 소비하는 쪽은 항상 pop으로 뮤텍스를 놓은 뒤에야 방/세션 락을 잡는다)
+		*
+		* 다만 g_io_q의 유일한 소비자인 net 스레드는 /metrics 스크레이프를 처리할 때
+		* (handle_metrics_accept -> metrics_render -> state_count_active_rooms) 이 g_rooms_lock을
+		* 다시 필요로 한다. 그래서 여기서 blocking push(job_queue_push)를 쓰면, 마침 g_io_q가 가득 차
+		* 있고 net 스레드가 그 /metrics 처리 중 g_rooms_lock 대기에 걸린 순간이 겹칠 경우 서로를
+		* 영원히 기다리는 데드락이 된다(이 워커는 큐에 자리가 나길 기다리는데 큐를 비울 net 스레드는
+		* 이 워커가 놓아줄 g_rooms_lock을 기다림). 그래서 반드시 non-blocking인 job_queue_try_push
+		* 기반의 job_queue_push_redis_unsubscribe를 써야 한다 - 큐가 가득 차면 블록 대신 그냥
+		* 드롭하고 로그만 남긴다(JOB_REDIS_UNSUBSCRIBE는 이 코드베이스의 기존 정책대로 재시도 없는
+		* best-effort 요청이라, 드롭돼도 이 pod가 잠시 더 오래 구독 상태로 남아 불필요한 메시지를
+		* 더 받는 정도이지 메시지 유실로 이어지지는 않는다)
 		*/
 		if (did_leave && now_empty_local) {
-			job_queue_push_redis_unsubscribe(&g_io_q, room_id);
-			net_wakeup();
+			if (job_queue_push_redis_unsubscribe(&g_io_q, room_id) == 0) {
+				net_wakeup();
+			} else {
+				log_json("ERROR", "redis_unsubscribe_job_dropped", "room_id", LOG_ARG_INT, room_id, NULL);
+			}
 		}
 	}
 
