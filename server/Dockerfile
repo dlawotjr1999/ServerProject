@@ -2,6 +2,10 @@
 # 컴파일에 필요한 gcc 툴체인은 이 스테이지에만 있으면 되고, 최종 런타임 이미지에는 남기지 않음
 FROM gcc:13 AS build
 
+# hiredis 헤더/라이브러리 (3단계) - libhiredis-dev는 런타임 .so도 의존성으로 함께 설치함
+RUN apt-get update && apt-get install -y --no-install-recommends libhiredis-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 
 # 소스 전체를 빌드 컨테이너 안으로 복사한 뒤, 기존 Makefile 그대로 사용해 빌드
@@ -12,6 +16,11 @@ RUN make clean && make
 # ---- runtime stage ----
 # 빌드 도구가 전혀 필요 없는 최소 이미지. 공격 표면과 이미지 크기를 줄이기 위해 slim 사용
 FROM debian:bookworm-slim
+
+# hiredis 런타임 라이브러리 (3단계) - -dev 패키지를 그대로 써서 정확한 런타임 전용 패키지명을
+# 추측하지 않음(포트폴리오 규모에서 이미지 크기보다 확실한 동작을 우선함)
+RUN apt-get update && apt-get install -y --no-install-recommends libhiredis-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # 컨테이너 안에서 root로 프로세스를 띄우지 않도록 전용 사용자/그룹 생성
 # 3800/9100은 1024 이상의 비특권 포트라 non-root로도 bind 가능함

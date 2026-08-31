@@ -13,7 +13,10 @@ typedef enum {
 	JOB_DISCONNECT,
 	JOB_SHUTDOWN,
 	JOB_SEND,
-	JOB_CLOSE       /* logic -> net: 세션 정리가 끝났으니 이 fd를 이제 실제로 close해도 된다는 신호 */
+	JOB_CLOSE,              /* logic -> net: 세션 정리가 끝났으니 이 fd를 이제 실제로 close해도 된다는 신호 */
+	JOB_REDIS_SUBSCRIBE,    /* logic -> net: room_id 채널 구독을 시작하라는 요청 (3단계) */
+	JOB_REDIS_UNSUBSCRIBE,  /* logic -> net: room_id 채널 구독을 중단하라는 요청 (3단계) */
+	JOB_ROOM_DELIVER        /* net -> logic: Redis pub/sub으로 도착한 메시지를 로컬 멤버에게 전달하라는 요청 (3단계) */
 } job_type_t;
 
 typedef enum {
@@ -28,9 +31,13 @@ typedef struct {
 	* JOB_PACKET / JOB_SEND: 대상 세션의 session_id (fd가 아님 -> fd 재사용과 무관하게 항상 같은 신원을 가리킴)
 	* JOB_DISCONNECT: session_id(정리 대상) + fd(정리 완료 후 net 스레드가 close할 대상)를 함께 운반
 	* JOB_CLOSE: fd만 사용 (net 스레드 내부적으로 실제 close를 수행하기 위함)
+	* JOB_REDIS_SUBSCRIBE / JOB_REDIS_UNSUBSCRIBE: room_id만 사용 (3단계)
+	* JOB_ROOM_DELIVER: room_id + session_id(배송에서 제외할 원 발신자의 클러스터 전역 id를 담는 데 재사용
+	*                   - pod-로컬 session_id가 아님에 주의) + packet (3단계)
 	*/
 	int session_id;
 	int fd;
+	int room_id;
 
 	packet_t packet;
 } job_t;
@@ -52,6 +59,10 @@ typedef struct {
 
 void job_queue_init(job_queue_t* q);
 void job_queue_push(job_queue_t* q, job_t* job);
+/* job_queue_push()와 달리 큐가 가득 차도 절대 블록하지 않는다 - 가득 찼으면 즉시 -1을 반환하고
+* 아무것도 넣지 않는다. 호출자가 락을 쥔 채로 push해야 해서 블로킹이 데드락으로 이어질 수 있는
+* 상황(예: room_leave가 g_rooms_lock을 쥔 채로 이 큐에 push하는 경우)에 쓴다. 성공하면 0 반환 */
+int job_queue_try_push(job_queue_t* q, job_t* job);
 int job_queue_pop(job_queue_t* q, job_t* out, jobq_mode_t mode);
 int job_queue_depth(job_queue_t* q);
 
@@ -60,6 +71,11 @@ void job_queue_push_disconnect(job_queue_t* q, int session_id, int fd);
 void job_queue_push_send(job_queue_t* q, int session_id, packet_t* pkt);
 void job_queue_push_close(job_queue_t* q, int fd);
 void job_queue_push_shutdown(job_queue_t* q);
+void job_queue_push_redis_subscribe(job_queue_t* q, int room_id);
+/* room_leave()가 g_rooms_lock을 쥔 채로 호출하므로 non-blocking(job_queue_try_push)으로 push한다.
+* 0이면 push 성공, -1이면 큐가 가득 차서 드롭됐음을 뜻함(호출자가 로그만 남기고 넘어가면 됨) */
+int job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id);
+void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt);
 
 #ifdef __cplusplus
 }

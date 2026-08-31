@@ -7,6 +7,7 @@
 #include "state.h"
 #include "log.h"
 #include "metrics.h"
+#include "redis_client.h"
 
 static int listen_fd = -1;
 static int metrics_listen_fd = -1;
@@ -388,6 +389,20 @@ int net_init() {
 	ev.data.fd = metrics_listen_fd;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, metrics_listen_fd, &ev);
 
+	/*
+	* Redis 연결(명령용 + 구독용) 초기화 (3단계)
+	* net_init()의 다른 실패 경로와 동일하게, 실패하면 -1을 반환해 서버가 즉시 종료되게 함
+	*/
+	if (redis_client_init(REDIS_HOST, REDIS_PORT) < 0) {
+		fprintf(stderr, "redis_client_init failed\n");
+		return -1;
+	}
+
+	/* 구독 전용 연결의 fd를 같은 epoll 인스턴스에 등록 - metrics_listen_fd와 동일한 패턴 */
+	ev.events = EPOLLIN;
+	ev.data.fd = redis_client_sub_fd();
+	epoll_ctl(epfd, EPOLL_CTL_ADD, redis_client_sub_fd(), &ev);
+
 	/* 채팅용/메트릭용 리스닝 소켓이 모두 bind에 성공했으므로 이 시점부터 준비 완료로 표시 */
 	g_net_ready = true;
 
@@ -445,6 +460,18 @@ void net_run() {
 			else if (job.type == JOB_CLOSE) {
 				close_connection(job.fd);
 			}
+			else if (job.type == JOB_REDIS_SUBSCRIBE) {
+				/* 실패를 무시하면 이 pod만 그 방의 cross-pod 메시지를 못 듣게 되는데 아무 흔적도
+				* 남지 않는다. 재시도는 하지 않고(프로젝트 정책) 로그만 남긴다 */
+				if (redis_subscribe_room(job.room_id) != 0) {
+					log_json("ERROR", "redis_subscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
+				}
+			}
+			else if (job.type == JOB_REDIS_UNSUBSCRIBE) {
+				if (redis_unsubscribe_room(job.room_id) != 0) {
+					log_json("ERROR", "redis_unsubscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
+				}
+			}
 		}
 
 		/* epoll로 전달된 각 이벤트 처리 */
@@ -465,6 +492,43 @@ void net_run() {
 			/* 메트릭/헬스체크 스크레이퍼 연결 처리 (채팅 연결과 다른 경로이므로 이후 로직으로 흘러가지 않도록 continue) */
 			if (fd == metrics_listen_fd) {
 				handle_metrics_accept();
+				continue;
+			}
+
+			/* Redis 구독 연결에 pub/sub 메시지가 도착 (3단계) - 완전한 메시지를 전부 소진할 때까지 반복 */
+			if (fd == redis_client_sub_fd()) {
+				int room_id, except_id;
+				packet_t pkt;
+				int rc;
+
+				/*
+				* 종료 조건은 "0(더 읽을 것 없음)" 또는 "음수(오류)"뿐이다.
+				* 2는 "확인 응답 같은 비-메시지 응답을 하나 소비했다"는 뜻이라 계속 읽어야 한다 -
+				* 여기서 멈추면 같은 소켓 읽기에 뒤따라온 진짜 채팅 메시지가 hiredis reader 버퍼에
+				* 남고, OS 소켓은 이미 비어 level-trigger epoll도 다시 안 깨워주므로 무관한 다음
+				* publish가 올 때까지 그 메시지가 무한정 지연된다 (redis_client.h의 반환값 계약 참고)
+				*/
+				while ((rc = redis_sub_read(&room_id, &except_id, &pkt)) > 0) {
+					if (rc == 1)
+						job_queue_push_room_deliver(&g_logic_q, room_id, except_id, &pkt);
+				}
+
+				/*
+				* 오류면 구독 연결이 끊어진 것이다(Redis 재시작/네트워크 단절 등).
+				* fd는 계속 epoll에서 readable로 남아있어 그냥 continue하면 100% CPU를 태우며
+				* 같은 에러 로그만 무한히 쏟아내고, 그동안 cross-pod 배송은 완전히 죽어있다.
+				* 이 프로젝트는 Redis 연결 실패에 대해 재연결/서킷브레이커를 두지 않고 fail-fast
+				* (net_init() 실패와 동일)로 처리하므로, 여기서도 fd를 감시에서 빼고 not-ready로
+				* 내린 뒤 기존 graceful shutdown 경로를 그대로 타서 프로세스를 끝낸다
+				* -> k8s가 pod을 재시작하면서 두 연결 모두 새로 맺는다
+				*/
+				if (rc < 0) {
+					log_json("ERROR", "redis_sub_read_error", "action", LOG_ARG_STR, "terminate", NULL);
+					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+					g_net_ready = false;   /* readiness probe가 즉시 실패해 트래픽이 끊김 */
+					g_redis_fatal = 1;     /* main이 종료 코드 1로 빠져나가게 함 */
+					g_terminate = 1;       /* 아래 epoll 루프 조건에서 정상 종료 절차 시작 */
+				}
 				continue;
 			}
 
@@ -657,6 +721,15 @@ void net_run() {
 		close(metrics_listen_fd);
 		metrics_listen_fd = -1;
 	}
+
+	/*
+	* redis_client_shutdown()은 여기서 부르지 않는다.
+	* net_run()이 반환한 시점에는 logic worker들이 아직 JOB_SHUTDOWN을 받지도 못한 상태이고,
+	* 그들의 종료 경로(handle_shutdown -> session_remove_all -> room_leave -> redis_leave_room)가
+	* g_redis_cmd를 계속 쓴다. 여기서 커넥션을 free하면 SIGTERM 시점에 방에 남아있던 유저가
+	* 한 명이라도 있을 때 워커가 이미 해제된 커넥션을 참조한다(use-after-free).
+	* 그래서 정리는 main.c가 모든 워커를 pthread_join으로 회수한 뒤에 수행한다
+	*/
 
 	/* 모든 연결 정리 */
 	for (int fd = 0; fd < MAX_CLIENTS; fd++) {

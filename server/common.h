@@ -23,6 +23,8 @@
 
 #define PORTNUM 3800
 #define METRICS_PORT 9100
+#define REDIS_HOST "redis"   /* k8s Service 이름 - k8s DNS가 자동으로 해석함 (k8s/redis.yaml) */
+#define REDIS_PORT 6379
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 4096
 
@@ -37,6 +39,13 @@
 #define JOB_QUEUE_SIZE 1024
 
 extern volatile sig_atomic_t g_terminate;
+
+/*
+* 복구 불가능한 Redis 런타임 장애(구독 연결 유실)로 종료하는 중인지 나타내는 플래그
+* g_terminate와 동일한 패턴(main.c에 정의, net.c에서 설정)이며, main이 이 값을 보고 종료 코드를
+* 0이 아닌 값으로 돌려준다 -> k8s가 "정상 종료"가 아니라 "실패 후 재시작"으로 구분해서 보게 함
+*/
+extern volatile sig_atomic_t g_redis_fatal;
 
 typedef enum {
 	PKT_CHAT = 1,        // 채팅

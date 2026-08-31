@@ -2,7 +2,7 @@ CC := gcc
 CXX := g++
 CFLAGS := -Wall -Wextra -O2 -pthread
 CXXFLAGS := -Wall -Wextra -O2 -pthread -std=c++17
-LDFLAGS := -pthread
+LDFLAGS := -pthread -lhiredis
 
 # net.c/protocol.c/main.c/logic.c는 C로, state.cpp/job_queue.cpp/log.cpp는 C++로 유지(REDESIGN.md 참고)
 C_SRCS := $(wildcard *.c)
