@@ -23,7 +23,7 @@
 
 #define PORTNUM 3800
 #define METRICS_PORT 9100
-#define REDIS_HOST "127.0.0.1"   /* k8s에서는 서비스 이름으로 바뀔 예정 (Task 10에서 배포 시 확정) */
+#define REDIS_HOST "redis"   /* k8s Service 이름 - k8s DNS가 자동으로 해석함 (k8s/redis.yaml) */
 #define REDIS_PORT 6379
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 4096

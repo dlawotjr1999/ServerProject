@@ -1,7 +1,7 @@
-# 채팅 서버 본체: ConfigMap(자리만 마련, 현재는 미사용) + Deployment(replicas=1) + Service
+# 채팅 서버 본체: ConfigMap(자리만 마련, 현재는 미사용) + Deployment(replicas=3) + Service
 #
-# replicas=1인 이유: 세션이 fd 기반이라(server/state.c) pod 간 메시지 전달 경로가 없음
-# (2026-08-20-infra-expansion-design.md 참고). 3단계에서 Redis pub/sub 도입 후 늘릴 예정
+# replicas=3: 3단계(Redis pub/sub)에서 매치메이킹과 메시지 전파를 Redis로 위임해
+# pod 간 메시지 전달 경로가 생겼으므로 수평 확장이 가능해짐 (2026-08-28-redis-pubsub-design.md 참고)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,7 +19,7 @@ metadata:
   labels:
     app: chat-server
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: chat-server
