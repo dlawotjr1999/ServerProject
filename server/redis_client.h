@@ -54,6 +54,14 @@ int redis_unsubscribe_room(int room_id);
 */
 int redis_sub_read(int* out_room_id, int* out_except_id, packet_t* out_pkt);
 
+/*
+* 클러스터 전역에서 유일한 정수 id를 하나 발급받는다(Redis INCR 기반).
+* 방에 입장하는 세션마다 하나씩 발급받아, cross-pod pub/sub 자기 자신 제외 판정에 쓴다
+* (로컬 session_id는 pod마다 독립적으로 1부터 증가하므로 클러스터 전역에서 유일하지 않음 - 이 함수가
+* 그 문제를 해결한다). 성공하면 0을 반환하고 *out_global_id를 채운다. 실패하면 -1을 반환한다
+*/
+int redis_next_global_id(int* out_global_id);
+
 #ifdef __cplusplus
 }
 #endif

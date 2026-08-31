@@ -124,6 +124,14 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 			break;
 		}
 
+		/* cross-pod pub/sub 자기 자신 제외 판정에 쓸 클러스터 전역 id 발급 (3단계 버그 수정) -
+		* 로컬 session_id는 pod마다 독립적으로 증가해 클러스터 전역에서 유일하지 않아, 서로 다른 pod의
+		* 세션이 우연히 같은 session_id를 가지면 상대 pod이 자기 메시지로 착각해 걸러버리는 문제가 있었음 */
+		if (redis_next_global_id(&s->global_id) != 0) {
+			log_json("ERROR", "redis_global_id_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			break;
+		}
+
 		/* 이 pod에서 이 방에 로컬 멤버가 처음 생긴 경우에만 Redis 채널 구독을 시작함 */
 		bool first_local_member = room_join(r, s);
 		if (first_local_member) {
@@ -160,7 +168,7 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		out.type = PKT_CHAT;
 		out.length = 2 + (uint16_t)n;
 
-		if (redis_publish_chat(room_id, s->session_id, &out) != 0) {
+		if (redis_publish_chat(room_id, s->global_id, &out) != 0) {
 			log_json("ERROR", "redis_publish_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			break;
 		}

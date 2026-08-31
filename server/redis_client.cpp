@@ -154,6 +154,21 @@ int redis_leave_room(int session_id, int room_id)
 	return ok;
 }
 
+int redis_next_global_id(int* out_global_id)
+{
+	PosixLockGuard lock(g_redis_cmd_lock);
+	redisReply* reply = (redisReply*)redisCommand(g_redis_cmd, "INCR global_session_seq");
+	if (!reply) return -1;
+
+	int ok = -1;
+	if (reply->type == REDIS_REPLY_INTEGER) {
+		*out_global_id = (int)reply->integer;
+		ok = 0;
+	}
+	freeReplyObject(reply);
+	return ok;
+}
+
 int redis_publish_chat(int room_id, int except_session_id, const packet_t* pkt)
 {
 	if (!pkt) return -1;

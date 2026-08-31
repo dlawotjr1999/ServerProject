@@ -390,7 +390,7 @@ void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt)
 			session_t* s = room->users[i];
 			if (!s) continue;
 			if (!session_is_alive(s)) continue;
-			if (s->session_id == except_session_id) continue;
+			if (s->global_id == except_session_id) continue;   /* except_session_id는 이제 global_id를 담아 온다(3단계 버그 수정) */
 			target_ids[count++] = s->session_id;
 		}
 	}

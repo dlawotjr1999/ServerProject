@@ -12,6 +12,10 @@ extern "C" {
 // refcount 필드는 없음 -> state.cpp 내부에서 std::shared_ptr가 대신 관리함(REDESIGN.md 참고)
 typedef struct session {
 	int session_id;
+	int global_id;   /* 클러스터 전역 유일 id (3단계 수정) - PKT_JOIN_ROOM에서 발급받음, 로컬 session_id
+	                  * 는 pod마다 독립적으로 증가해 클러스터 전역에서 유일하지 않으므로 cross-pod pub/sub
+	                  * 자기 자신 제외 판정에는 이 필드를 쓴다. 로컬 addressing(JOB_SEND 등)은 여전히
+	                  * session_id를 그대로 씀 - 이 필드는 그 용도를 대체하지 않는다 */
 	int room_id;
 	bool alive;
 	pthread_mutex_t lock;    // alive / room_id 접근을 보호
