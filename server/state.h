@@ -55,9 +55,16 @@ void state_init(void);   /* 서버 시작 시 1회 호출 - 방 슬롯의 뮤텍
 room_t* room_get(int room_id);
 room_t* room_get_or_init(int room_id);   /* Redis가 배정한 room_id에 대해 로컬 슬롯을 준비 (3단계) */
 
-bool room_join(room_t* room, session_t* s);   /* 반환값: 이 입장으로 로컬 인원이 0->1이 됐으면 true */
+/*
+* 방에 입장시킨다. 입장 자체의 성공/실패를 반환값으로(성공 0 / 실패 -1), "이 입장으로 로컬 인원이
+* 0->1이 됐는지"는 출력 인자로 분리해서 알려준다(redis_join_room의 int 반환 + out 인자 패턴과 동일).
+* 예전처럼 bool 하나로 first_local_member만 돌려주면 "입장은 했지만 첫 멤버가 아님"과 "아예 입장을
+* 못 함(세션이 이미 죽었거나 방이 꽉 참)"이 둘 다 false로 뭉개져, 호출부가 실패를 감지할 수 없었다.
+* out_first_local_member는 NULL이어도 되고, 실패 시에는 항상 false로 채워진다
+*/
+int room_join(room_t* room, session_t* s, bool* out_first_local_member);
 void room_leave(session_t* s);
-void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt);   /* 3단계: id 기반, 로컬 전달만 담당 */
+void room_broadcast_local(int room_id, int except_global_id, packet_t* pkt);   /* 3단계: id 기반, 로컬 전달만 담당 */
 
 /* metrics API */
 int state_count_active_sessions(void);

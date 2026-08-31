@@ -136,13 +136,14 @@ void job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id) {
 
 /*
 * Redis pub/sub으로 도착한 메시지를 로컬 멤버에게 전달하라는 job (3단계, net -> logic)
-* except_session_id는 job_t.session_id 필드를 재사용함(원 발신자를 배송 대상에서 제외하기 위함)
+* except_global_id는 job_t.session_id 필드를 재사용함(원 발신자를 배송 대상에서 제외하기 위함).
+* 담기는 값은 pod-로컬 session_id가 아니라 클러스터 전역 id(redis_next_global_id 발급분)다
 */
-void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_session_id, packet_t* pkt) {
+void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt) {
 	job_t job{};
 	job.type = JOB_ROOM_DELIVER;
 	job.room_id = room_id;
-	job.session_id = except_session_id;
+	job.session_id = except_global_id;
 	job.packet = *pkt;
 	job_queue_push(q, &job);
 }

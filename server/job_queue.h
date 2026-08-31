@@ -32,7 +32,8 @@ typedef struct {
 	* JOB_DISCONNECT: session_id(정리 대상) + fd(정리 완료 후 net 스레드가 close할 대상)를 함께 운반
 	* JOB_CLOSE: fd만 사용 (net 스레드 내부적으로 실제 close를 수행하기 위함)
 	* JOB_REDIS_SUBSCRIBE / JOB_REDIS_UNSUBSCRIBE: room_id만 사용 (3단계)
-	* JOB_ROOM_DELIVER: room_id + session_id(배송에서 제외할 원 발신자 id로 재사용) + packet (3단계)
+	* JOB_ROOM_DELIVER: room_id + session_id(배송에서 제외할 원 발신자의 클러스터 전역 id를 담는 데 재사용
+	*                   - pod-로컬 session_id가 아님에 주의) + packet (3단계)
 	*/
 	int session_id;
 	int fd;
@@ -68,7 +69,7 @@ void job_queue_push_close(job_queue_t* q, int fd);
 void job_queue_push_shutdown(job_queue_t* q);
 void job_queue_push_redis_subscribe(job_queue_t* q, int room_id);
 void job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id);
-void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_session_id, packet_t* pkt);
+void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt);
 
 #ifdef __cplusplus
 }

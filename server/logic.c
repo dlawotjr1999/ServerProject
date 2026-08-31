@@ -71,7 +71,8 @@ void* worker_thread(void* arg)
 
 		/*
 		* Redis pub/sub으로 도착한 채팅 메시지를 이 pod의 로컬 멤버에게 전달 (3단계)
-		* job.room_id: 대상 방, job.session_id: 배송에서 제외할 원 발신자(재사용된 필드)
+		* job.room_id: 대상 방, job.session_id: 배송에서 제외할 원 발신자의 클러스터 전역 id
+		* (job_t.session_id 필드를 재사용한 것일 뿐, pod-로컬 session_id가 아님)
 		*/
 		case JOB_ROOM_DELIVER: {
 			room_broadcast_local(job.room_id, job.session_id, &job.packet);
@@ -118,9 +119,17 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 			break;
 		}
 
+		/*
+		* 여기부터는 redis_join_room()이 이미 Redis 쪽 인원 카운트를 +1 해둔 상태다.
+		* 그러니 아래 어떤 경로로 실패해서 빠져나가든, 반드시 방금 잡은 자리를 반납해야 한다.
+		* 반납하지 않으면 아무도 없는 방의 카운트가 0으로 돌아가지 않아 freelist로 회수되지 못하고,
+		* MAX_ROOMS 고정 상한이 조금씩 영구적으로 잠식된다
+		*/
 		room_t* r = room_get_or_init(room_id);
 		if (!r) {
 			log_json("ERROR", "room_init_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			if (redis_leave_room(s->session_id, room_id) != 0)
+				log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			break;
 		}
 
@@ -129,11 +138,22 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		* 세션이 우연히 같은 session_id를 가지면 상대 pod이 자기 메시지로 착각해 걸러버리는 문제가 있었음 */
 		if (redis_next_global_id(&s->global_id) != 0) {
 			log_json("ERROR", "redis_global_id_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			if (redis_leave_room(s->session_id, room_id) != 0)
+				log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			break;
+		}
+
+		/* 입장 자체가 실패하는 경우(처리 중 세션이 죽었거나 방이 이미 꽉 참)도 자리를 반납해야 한다.
+		* 예전에는 room_join이 first_local_member만 돌려줘서 이 실패가 아예 보이지 않았음 */
+		bool first_local_member = false;
+		if (room_join(r, s, &first_local_member) != 0) {
+			log_json("ERROR", "room_join_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+			if (redis_leave_room(s->session_id, room_id) != 0)
+				log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			break;
 		}
 
 		/* 이 pod에서 이 방에 로컬 멤버가 처음 생긴 경우에만 Redis 채널 구독을 시작함 */
-		bool first_local_member = room_join(r, s);
 		if (first_local_member) {
 			job_queue_push_redis_subscribe(&g_io_q, room_id);
 			net_wakeup();

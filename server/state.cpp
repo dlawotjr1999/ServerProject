@@ -262,19 +262,22 @@ room_t* room_get_or_init(int room_id)
 
 /*
 * 방에 입장하는 함수 (기존 락 순서/원자성 보장은 그대로 유지)
-* 3단계: 반환값이 추가됨 - 이 입장으로 로컬 인원이 0->1이 됐으면 true(이 pod에서 이 방에 대한
-* 관심이 방금 처음 생겼다는 뜻 -> 호출부(logic.c)가 Redis 구독을 새로 시작해야 함)
+* 3단계: 입장 성공 여부(0/-1)와 "이 입장으로 로컬 인원이 0->1이 됐는지"(출력 인자)를 분리해서
+* 알려준다. 후자는 이 pod에서 이 방에 대한 관심이 방금 처음 생겼다는 뜻 -> 호출부(logic.c)가
+* Redis 채널 구독을 새로 시작해야 한다는 신호다.
+* (예전에는 first_local_member 하나만 bool로 돌려줘서, 입장 실패가 "첫 멤버 아님"과 구분되지 않았음)
 */
-bool room_join(room_t* room, session_t* s)
+int room_join(room_t* room, session_t* s, bool* out_first_local_member)
 {
-	if (!room || !s) return false;
+	if (out_first_local_member) *out_first_local_member = false;
+	if (!room || !s) return -1;
 
 	bool joined = false;
 	bool first_local_member = false;
 	int joined_room_id = -1;
 	{
 		PosixLockGuard rooms_lock(g_rooms_lock);
-		if (!room->live) return false;
+		if (!room->live) return -1;
 
 		PosixLockGuard room_lock(room->lock);
 		PosixLockGuard session_lock(s->lock);
@@ -295,10 +298,12 @@ bool room_join(room_t* room, session_t* s)
 		}
 	}
 
-	if (joined) {
-		log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, joined_room_id, "first_local_member", LOG_ARG_INT, first_local_member ? 1 : 0, NULL);
-	}
-	return first_local_member;
+	if (!joined) return -1;
+
+	log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, joined_room_id, "first_local_member", LOG_ARG_INT, first_local_member ? 1 : 0, NULL);
+
+	if (out_first_local_member) *out_first_local_member = first_local_member;
+	return 0;
 }
 
 /*
@@ -330,21 +335,39 @@ void room_leave(session_t* s)
 			return;
 		}
 
-		PosixLockGuard room_lock(room->lock);
+		{
+			PosixLockGuard room_lock(room->lock);
 
-		for (int i = 0; i < room->user_count; i++) {
-			if (room->users[i] == s) {
-				room->users[i] = room->users[room->user_count - 1];
-				room->users[room->user_count - 1] = nullptr;
-				room->user_count--;
-				did_leave = true;
-				break;
+			for (int i = 0; i < room->user_count; i++) {
+				if (room->users[i] == s) {
+					room->users[i] = room->users[room->user_count - 1];
+					room->users[room->user_count - 1] = nullptr;
+					room->user_count--;
+					did_leave = true;
+					break;
+				}
+			}
+
+			now_empty_local = (room->user_count == 0);
+			if (now_empty_local) {
+				room->live = false;
 			}
 		}
 
-		now_empty_local = (room->user_count == 0);
-		if (now_empty_local) {
-			room->live = false;
+		/*
+		* 구독 해제 job은 "이 방이 로컬에서 비었다(live=false)"고 판정한 상태 전이와 반드시 같은
+		* g_rooms_lock 구간 안에서 큐에 넣어야 한다.
+		* 예전처럼 락을 놓고 blocking redis_leave_room()까지 마친 뒤에 넣으면, 그 사이 다른 워커가
+		* 같은 room_id로 PKT_JOIN_ROOM을 처리해(room_get_or_init이 live=true로 되살리고 로컬 인원이
+		* 0->1이 되어 first_local_member=true) JOB_REDIS_SUBSCRIBE를 먼저 밀어넣을 수 있다.
+		* g_io_q는 FIFO라 net 스레드가 SUBSCRIBE -> UNSUBSCRIBE 순으로 실행해버리고, 살아있는 로컬
+		* 멤버가 있는 방을 이 pod만 조용히 못 듣게 된다(에러 로그도 남지 않음).
+		* 락 순서: g_io_q 내부 뮤텍스는 g_rooms_lock/room->lock 아래의 leaf다(job_queue_push는 큐
+		* 뮤텍스만 잡고, 큐를 소비하는 쪽은 항상 pop으로 뮤텍스를 놓은 뒤에야 방/세션 락을 잡는다)
+		*/
+		if (did_leave && now_empty_local) {
+			job_queue_push_redis_unsubscribe(&g_io_q, room_id);
+			net_wakeup();
 		}
 	}
 
@@ -354,14 +377,14 @@ void room_leave(session_t* s)
 	}
 
 	if (did_leave) {
-		redis_leave_room(s->session_id, room_id);
+		/* Redis 왕복은 상태 락 밖에서 해도 되는 부분이라 여기 그대로 둔다.
+		* 다만 실패를 무시하면 Redis 쪽 인원 카운트가 영영 안 줄어 그 방이 freelist로 회수되지
+		* 않으므로(=MAX_ROOMS 고정 상한의 영구 잠식), 최소한 로그는 남긴다(재시도는 하지 않음) */
+		if (redis_leave_room(s->session_id, room_id) != 0) {
+			log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+		}
 
 		log_json("INFO", "room_left", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, "local_empty", LOG_ARG_INT, now_empty_local ? 1 : 0, NULL);
-
-		if (now_empty_local) {
-			job_queue_push_redis_unsubscribe(&g_io_q, room_id);
-			net_wakeup();
-		}
 	}
 }
 
@@ -371,7 +394,7 @@ void room_leave(session_t* s)
 * 포맷팅(개행 추가 등)은 이미 발행 시점(logic.c)에 끝났으므로 pkt을 그대로 재사용한다 ->
 * 그래야 모든 pod가 같은 바이트를 배송함
 */
-void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt)
+void room_broadcast_local(int room_id, int except_global_id, packet_t* pkt)
 {
 	if (!pkt) return;
 	room_t* room = room_get(room_id);
@@ -390,7 +413,7 @@ void room_broadcast_local(int room_id, int except_session_id, packet_t* pkt)
 			session_t* s = room->users[i];
 			if (!s) continue;
 			if (!session_is_alive(s)) continue;
-			if (s->global_id == except_session_id) continue;   /* except_session_id는 이제 global_id를 담아 온다(3단계 버그 수정) */
+			if (s->global_id == except_global_id) continue;   /* pod-로컬 session_id가 아니라 클러스터 전역 id로 비교해야 함(3단계 버그 수정) */
 			target_ids[count++] = s->session_id;
 		}
 	}
