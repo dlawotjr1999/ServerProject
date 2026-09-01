@@ -57,7 +57,12 @@ static const char* k_join_script =
 	"      local count_key = room_key .. ':pod:' .. pid .. ':count'\n"
 	"      local stale = tonumber(redis.call('GET', count_key) or '0')\n"
 	"      if stale > 0 then\n"
-	"        redis.call('DECRBY', room_key .. ':count', stale)\n"
+	"        local cur = tonumber(redis.call('GET', room_key .. ':count') or '0')\n"
+	"        local dec = stale\n"
+	"        if dec > cur then dec = cur end\n"
+	"        if dec > 0 then\n"
+	"          redis.call('DECRBY', room_key .. ':count', dec)\n"
+	"        end\n"
 	"      end\n"
 	"      redis.call('DEL', count_key)\n"
 	"      redis.call('SREM', pods_key, pid)\n"
@@ -181,7 +186,7 @@ int redis_client_init(const char* host, int port)
 
 	if (!load_matchmaking_scripts()) return -1;
 
-	log_json("INFO", "redis_client_ready", "host", LOG_ARG_STR, host, "port", LOG_ARG_INT, port, NULL);
+	log_json("INFO", "redis_client_ready", "host", LOG_ARG_STR, host, "port", LOG_ARG_INT, port, "pod_id", LOG_ARG_STR, g_pod_id, NULL);
 	return 0;
 }
 
@@ -294,23 +299,37 @@ int redis_room_heartbeat(int room_id, int local_count)
 	if (!ensure_cmd_connected()) return -1;
 
 	if (local_count > 0) {
-		redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SADD %s %s", pods_key, g_pod_id);
-		if (r1) freeReplyObject(r1); else return -1;
+		/* lease -> count -> SADD 순서를 반드시 지켜야 한다: 중간에 실패해도 SADD가 아직 안 됐다면
+		* 이 pod은 :pods SET에 아직 보이지 않으므로 join 스크립트의 reap 루프가 아예 건드리지 않고,
+		* lease 자체의 TTL로 조용히 자연 소멸한다(살아있는 pod의 기여분이 lease 없이 노출되는 창을
+		* 없앰) - SADD를 먼저 하는 순서였다면 count/lease가 아직 안 쓰인 채로 :pods에만 보여서,
+		* 다음 reap 스캔이 "lease 없음"으로 오판해 아직 살아있는 pod의 진짜 인원수를 걷어가 버린다 */
+		redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SET %s 1 EX 30", lease_key);
+		if (!r1 || r1->type == REDIS_REPLY_ERROR) { if (r1) freeReplyObject(r1); return -1; }
+		freeReplyObject(r1);
 
-		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SET %s %d", count_key, local_count);
-		if (r2) freeReplyObject(r2); else return -1;
+		/* count_key도 lease와 같은 TTL을 줘서, 이 방을 매치메이킹 스캔이 다시 안 찾아가더라도
+		* 고아가 된 count 키가 무한정 남지 않고 스스로 만료되게 한다. 살아있는 pod은 매 하트비트마다
+		* 갱신되므로 실질적으로 만료되지 않는다 */
+		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SET %s %d EX 30", count_key, local_count);
+		if (!r2 || r2->type == REDIS_REPLY_ERROR) { if (r2) freeReplyObject(r2); return -1; }
+		freeReplyObject(r2);
 
-		redisReply* r3 = (redisReply*)redisCommand(g_redis_cmd, "SET %s 1 EX 30", lease_key);
-		if (r3) freeReplyObject(r3); else return -1;
+		redisReply* r3 = (redisReply*)redisCommand(g_redis_cmd, "SADD %s %s", pods_key, g_pod_id);
+		if (!r3 || r3->type == REDIS_REPLY_ERROR) { if (r3) freeReplyObject(r3); return -1; }
+		freeReplyObject(r3);
 	} else {
 		redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SREM %s %s", pods_key, g_pod_id);
-		if (r1) freeReplyObject(r1); else return -1;
+		if (!r1 || r1->type == REDIS_REPLY_ERROR) { if (r1) freeReplyObject(r1); return -1; }
+		freeReplyObject(r1);
 
 		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "DEL %s", count_key);
-		if (r2) freeReplyObject(r2); else return -1;
+		if (!r2 || r2->type == REDIS_REPLY_ERROR) { if (r2) freeReplyObject(r2); return -1; }
+		freeReplyObject(r2);
 
 		redisReply* r3 = (redisReply*)redisCommand(g_redis_cmd, "DEL %s", lease_key);
-		if (r3) freeReplyObject(r3); else return -1;
+		if (!r3 || r3->type == REDIS_REPLY_ERROR) { if (r3) freeReplyObject(r3); return -1; }
+		freeReplyObject(r3);
 	}
 
 	return 0;

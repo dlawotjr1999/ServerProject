@@ -1,5 +1,4 @@
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
 #include <poll.h>
 
 #include "common.h"
@@ -15,10 +14,12 @@ static int listen_fd = -1;
 static int metrics_listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
-static int heartbeat_timer_fd = -1;
 
 /* 메트릭/헬스체크 전담 스레드(아래 metrics_thread_main 참고) - net_init()이 생성, net_run() 종료 시 join */
 static pthread_t g_metrics_tid;
+
+/* Redis room 하트비트 전담 스레드(아래 heartbeat_thread_main 참고) - net_init()이 생성, net_run() 종료 시 join */
+static pthread_t g_heartbeat_tid;
 
 /* net_init()이 리스닝 소켓 bind까지 전부 성공했는지 나타내는 플래그(readiness probe용) */
 static volatile bool g_net_ready = false;
@@ -304,6 +305,30 @@ static void* metrics_thread_main(void* arg)
 }
 
 /*
+* 방 하트비트(4단계 lease/heartbeat 복구)를 주기적으로 트리거하는 전담 스레드.
+* state_heartbeat_local_rooms()가 하는 일(g_redis_cmd_lock 아래 blocking Redis 호출, 방 개수만큼
+* 최대 3번씩)을 net 스레드(채팅 epoll 루프)에서 절대 하면 안 되므로 - 느려진 Redis 하나가 이
+* 스레드를 오래 막으면 채팅 accept/recv/send/g_io_q 드레인/SIGTERM 감지까지 전부 같이 막힌다
+* (metrics_thread_main()과 정확히 같은 이유로 별도 스레드 분리). 1초 단위로 g_terminate를
+* 확인하면서 10초마다 한 번씩 실제 하트비트를 수행한다
+*/
+static void* heartbeat_thread_main(void* arg)
+{
+	(void)arg;
+
+	while (!g_terminate) {
+		for (int waited = 0; waited < 10 && !g_terminate; ++waited) {
+			sleep(1);
+		}
+		if (g_terminate) break;
+
+		state_heartbeat_local_rooms();
+	}
+
+	return NULL;
+}
+
+/*
 * 네트워크 서버 초기화 함수
 * 리스닝 소켓 생성 -> 인스턴스 생성 -> eventfd 기반 wakeup 메커니즘 등록
 *
@@ -436,6 +461,17 @@ int net_init() {
 	}
 
 	/*
+	* Redis room 하트비트(4단계 lease/heartbeat 복구) 전담 스레드도 함께 띄운다 - 위
+	* heartbeat_thread_main()의 주석 참고. redis_client_init()이 아직 안 끝난 시점이지만, 이 스레드는
+	* state_heartbeat_local_rooms() 안에서 매번 자체적으로 Redis 호출을 하므로 여기서 미리 띄워도
+	* 문제 없다 (g_terminate가 아직 false인 동안은 최초 10초를 그냥 대기만 하다가 첫 하트비트를 보냄)
+	*/
+	if (pthread_create(&g_heartbeat_tid, NULL, heartbeat_thread_main, NULL) != 0) {
+		perror("heartbeat thread create error");
+		return -1;
+	}
+
+	/*
 	* Redis 연결(명령용 + 구독용) 초기화 (3단계)
 	* net_init()의 다른 실패 경로와 동일하게, 실패하면 -1을 반환해 서버가 즉시 종료되게 함
 	*/
@@ -448,29 +484,6 @@ int net_init() {
 	ev.events = EPOLLIN;
 	ev.data.fd = redis_client_sub_fd();
 	epoll_ctl(epfd, EPOLL_CTL_ADD, redis_client_sub_fd(), &ev);
-
-	/*
-	* Redis room 하트비트(3단계 lease/heartbeat 복구 메커니즘)를 주기적으로 트리거하는 타이머.
-	* lease TTL이 30초이므로, 최소 그 절반 이하 주기로 갱신해야 타이밍 지터가 있어도 안전하다 -
-	* 10초로 잡아 3배 여유를 둠
-	*/
-	heartbeat_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-	if (heartbeat_timer_fd < 0) {
-		perror("timerfd_create error");
-		return -1;
-	}
-	struct itimerspec its;
-	its.it_value.tv_sec = 10;
-	its.it_value.tv_nsec = 0;
-	its.it_interval.tv_sec = 10;
-	its.it_interval.tv_nsec = 0;
-	if (timerfd_settime(heartbeat_timer_fd, 0, &its, NULL) < 0) {
-		perror("timerfd_settime error");
-		return -1;
-	}
-	ev.events = EPOLLIN;
-	ev.data.fd = heartbeat_timer_fd;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, heartbeat_timer_fd, &ev);
 
 	/* 채팅용/메트릭용 리스닝 소켓이 모두 bind에 성공했으므로 이 시점부터 준비 완료로 표시 */
 	g_net_ready = true;
@@ -569,16 +582,6 @@ void net_run() {
 					uint64_t v;
 					while (read(wake_fd, &v, sizeof(v)) > 0) {}
 				}
-				continue;
-			}
-
-			/* Redis room 하트비트 타이머 발화 (3단계 lease/heartbeat 복구) - level-trigger epoll이라
-			* 다음에도 즉시 재발화하지 않도록 만료 횟수를 읽어 비운 뒤, 로컬 멤버가 있는 모든 방의
-			* lease를 갱신한다 */
-			if (fd == heartbeat_timer_fd) {
-				uint64_t expirations;
-				while (read(heartbeat_timer_fd, &expirations, sizeof(expirations)) > 0) {}
-				state_heartbeat_local_rooms();
 				continue;
 			}
 
@@ -818,6 +821,11 @@ void net_run() {
 	*/
 	pthread_join(g_metrics_tid, NULL);
 
+	/* 하트비트 전담 스레드도 같은 방식으로 join한다(4단계 lease/heartbeat 복구) - 이 스레드는
+	* 자신이 소유한 fd가 없으므로(state_heartbeat_local_rooms()가 g_redis_cmd_lock 아래 Redis
+	* 커넥션만 쓴다) fd close 순서와는 무관하게 아무 때나 join해도 안전하다 */
+	pthread_join(g_heartbeat_tid, NULL);
+
 	/* 서버 종료 시 listening 소켓 정리 */
 	if (listen_fd >= 0) {
 		close(listen_fd);
@@ -827,11 +835,6 @@ void net_run() {
 	if (metrics_listen_fd >= 0) {
 		close(metrics_listen_fd);
 		metrics_listen_fd = -1;
-	}
-	/* Redis room 하트비트 타이머 fd도 함께 정리 (3단계 lease/heartbeat 복구) */
-	if (heartbeat_timer_fd >= 0) {
-		close(heartbeat_timer_fd);
-		heartbeat_timer_fd = -1;
 	}
 
 	/*
