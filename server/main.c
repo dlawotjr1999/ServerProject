@@ -1,7 +1,14 @@
+/*
+* pthread_tryjoin_np()는 POSIX 표준이 아니라 glibc(GNU) 확장이라 _GNU_SOURCE를 정의해야
+* 선언이 보인다 - 반드시 다른 include보다 먼저(파일의 첫 줄) 와야 함, 아래 종료 시퀀스에서 씀
+*/
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "common.h"
 #include "net.h"
@@ -72,17 +79,55 @@ int main() {
 	}
 
 	/*
-	* 네트워크 이벤트 루프 실행
-	* net_run이 반환하면 종료 절차를 수행
-	* 종료 절차는 각 worker thread가 shutdown을 하나씩 받게 한 뒤,
-	* 전부 정리를 마칠 때까지 join으로 대기함 -> worker 정리 전에 프로세스가 먼저 죽는 것을 방지
+	* 네트워크 이벤트 루프 실행. net_run()이 반환하면 종료 절차를 시작한다.
+	*
+	* net_run()이 반환하는 순간 g_io_q의 유일한 소비자가 사라진다. 그런데 아직 남은 job을 처리
+	* 중인 worker가 disconnect->close나 broadcast->send 과정에서 job_queue_push_close()/
+	* job_queue_push_send()(둘 다 blocking)로 g_io_q에 넣을 수 있다 - 아무도 안 비우면 큐가
+	* 가득 찼을 때 그 worker가 영원히 멈추고, 그러면 이 worker는 이 함수가 몇 줄 아래에서 넣으려는
+	* JOB_SHUTDOWN도 영영 못 받아 pthread_join()이 끝나지 않는다(k8s는 결국 SIGKILL로 강제 종료).
+	* 최악의 경우 반대 방향으로도 막힐 수 있다 - g_logic_q가 이미 가득 찬 상태에서 모든 worker가
+	* g_io_q push에 막혀 아무도 g_logic_q를 못 비우면, 아래 JOB_SHUTDOWN을 넣으려는 이 스레드의
+	* push조차 블록될 수 있다(g_logic_q <-> g_io_q 상호 포화).
+	*
+	* 그래서 net_run() 종료 후에도 이 스레드(main)가 모든 worker가 join될 때까지 아래 두 가지를
+	* "동시에" 계속한다:
+	* 1) net_drain_io_queue()로 g_io_q를 계속 비워준다 - net_run()이 하던 소비자 역할을 이어받음
+	* 2) 아직 못 보낸 JOB_SHUTDOWN을 non-blocking(job_queue_try_push_shutdown)으로 재시도한다 -
+	*    blocking push였다면 위에서 설명한 상호 포화 상황에서 이 스레드 자신도 막혀버렸을 것이다
+	* pthread_tryjoin_np()(glibc 확장)로 각 worker가 이미 끝났는지 논블로킹으로 확인하면서,
+	* 아직 안 끝난 worker가 있으면 짧게 쉬었다가 위 두 가지를 반복한다
 	*/
 	net_run();
-	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
-		job_queue_push_shutdown(&g_logic_q);
-	}
-	for (int i = 0; i < WORKER_THREAD_NUM; i++) {
-		pthread_join(worker_tids[i], NULL);
+
+	bool shutdown_sent[WORKER_THREAD_NUM] = { false };
+	int shutdown_sent_count = 0;
+	bool joined[WORKER_THREAD_NUM] = { false };
+	int joined_count = 0;
+
+	while (joined_count < WORKER_THREAD_NUM) {
+		net_drain_io_queue();
+
+		for (int i = 0; i < WORKER_THREAD_NUM; i++) {
+			if (!shutdown_sent[i] && job_queue_try_push_shutdown(&g_logic_q) == 0) {
+				shutdown_sent[i] = true;
+				shutdown_sent_count++;
+			}
+		}
+		(void)shutdown_sent_count;   /* 디버깅/가독성용 카운터 - 조건문에는 안 씀 */
+
+		for (int i = 0; i < WORKER_THREAD_NUM; i++) {
+			if (joined[i]) continue;
+			if (pthread_tryjoin_np(worker_tids[i], NULL) == 0) {
+				joined[i] = true;
+				joined_count++;
+			}
+		}
+
+		if (joined_count < WORKER_THREAD_NUM) {
+			struct timespec ts = { 0, 1000000L };   /* 1ms - 바쁜 대기(busy wait)를 피하기 위한 짧은 sleep */
+			nanosleep(&ts, NULL);
+		}
 	}
 
 	/*

@@ -1,4 +1,5 @@
 #include <sys/eventfd.h>
+#include <poll.h>
 
 #include "common.h"
 #include "net.h"
@@ -13,6 +14,9 @@ static int listen_fd = -1;
 static int metrics_listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
+
+/* 메트릭/헬스체크 전담 스레드(아래 metrics_thread_main 참고) - net_init()이 생성, net_run() 종료 시 join */
+static pthread_t g_metrics_tid;
 
 /* net_init()이 리스닝 소켓 bind까지 전부 성공했는지 나타내는 플래그(readiness probe용) */
 static volatile bool g_net_ready = false;
@@ -186,9 +190,15 @@ static void handle_send_job(job_t* job)
 }
 
 /*
-* 메트릭/헬스체크 스크레이퍼 연결을 처리하는 함수
-* 채팅 클라이언트와 달리 요청/응답이 짧고 일회성이므로, epoll에 등록하지 않고
-* accept 즉시 이 자리에서 동기적으로 처리 후 close (net thread를 오래 막지 않도록 타임아웃을 둠)
+* 메트릭/헬스체크 스크레이퍼 연결을 처리하는 함수.
+* 채팅 클라이언트와 달리 요청/응답이 짧고 일회성이라고 보고, 원래는 채팅용 epoll 루프 안에서 accept
+* 직후 동기 recv/send(각 2초 타임아웃)로 처리했었다. 하지만 이 함수가 채팅 epoll 루프와 같은
+* 스레드에서 돌면, 응답을 늦게 받거나 안 받는 스크레이퍼 하나가 최대 4초(recv 2초 + send 2초) 동안
+* 그 스레드가 담당하는 모든 걸 - 채팅 accept/recv/send, Redis pub/sub 처리, I/O job 처리, 심지어
+* 다른 health/metrics 요청까지 - 전부 막아버린다. 연결만 반복하면 아주 적은 비용으로 서버 전체를
+* 사실상 멈출 수 있는 구멍이었다. 그래서 이 함수 자체(동기 recv/send + 타임아웃)는 그대로 두되,
+* 이제는 채팅 epoll 루프와 완전히 분리된 metrics_thread_main() 전용 스레드에서만 호출한다 -
+* 여기서 최대 4초가 걸려도 채팅 쪽은 전혀 영향받지 않는다
 */
 static void handle_metrics_accept(void)
 {
@@ -260,6 +270,35 @@ static void handle_metrics_accept(void)
 	ssize_t sent = send(cfd, resp, (size_t)resp_len, 0);
 	(void)sent; /* 스크레이퍼가 응답을 끝까지 못 받아도 서버 자체 동작에는 영향이 없으므로 무시 */
 	close(cfd);
+}
+
+/*
+* metrics_listen_fd 전담 스레드의 본체. 채팅용 epoll 루프(net_run)와 완전히 분리된 자기만의
+* accept 루프를 돈다 - metrics_listen_fd는 nonblocking이라 accept() 자체는 즉시 반환하지만,
+* "연결이 들어올 때까지 기다리는" 부분이 필요해서 poll()로 최대 1초까지 대기한다.
+* 1초로 짧게 잡은 건 blocking accept 대신 쓰는 것뿐이라 그 자체는 별 의미가 없고, g_terminate를
+* 주기적으로 다시 확인해서 종료 신호를 놓치지 않고 이 루프를 빠져나가기 위함이다(순수 blocking
+* accept였다면 종료 시점에 아무도 연결하지 않는 한 이 스레드가 영원히 poll에 막혀 join이 끝나지
+* 않았을 것이다)
+*/
+static void* metrics_thread_main(void* arg)
+{
+	(void)arg;
+
+	while (!g_terminate) {
+		struct pollfd pfd;
+		pfd.fd = metrics_listen_fd;
+		pfd.events = POLLIN;
+
+		int pr = poll(&pfd, 1, 1000);
+		if (pr <= 0) continue;   /* 타임아웃(0) 또는 오류(-1) - g_terminate 재확인하러 루프 처음으로 */
+
+		if (pfd.revents & POLLIN) {
+			handle_metrics_accept();
+		}
+	}
+
+	return NULL;
 }
 
 /*
@@ -384,10 +423,15 @@ int net_init() {
 
 	set_nonblocking(metrics_listen_fd);
 
-	/* 위에서 쓴 ev 변수를 재사용해 metrics_listen_fd도 같은 epoll 인스턴스(epfd)에 등록 */
-	ev.events = EPOLLIN;
-	ev.data.fd = metrics_listen_fd;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, metrics_listen_fd, &ev);
+	/*
+	* metrics_listen_fd는 채팅용 epoll 인스턴스(epfd)에 등록하지 않는다 - 대신 이 fd를 전담하는
+	* metrics_thread_main() 스레드를 따로 띄운다(위 handle_metrics_accept()의 주석 참고: 느린
+	* 스크레이퍼 하나가 채팅 스레드 전체를 최대 4초씩 막을 수 있던 문제를 스레드 분리로 없앰)
+	*/
+	if (pthread_create(&g_metrics_tid, NULL, metrics_thread_main, NULL) != 0) {
+		perror("metrics thread create error");
+		return -1;
+	}
 
 	/*
 	* Redis 연결(명령용 + 구독용) 초기화 (3단계)
@@ -409,6 +453,40 @@ int net_init() {
 	/* 서버 초기화 완료 */
 	log_json("INFO", "server_started", "port", LOG_ARG_INT, PORTNUM, "metrics_port", LOG_ARG_INT, METRICS_PORT, NULL);
 	return 0;
+}
+
+/*
+* g_io_q에 쌓인 작업(SEND/CLOSE/REDIS_SUBSCRIBE/REDIS_UNSUBSCRIBE)을 지금 당장 큐에 있는 만큼만
+* 한 번 훑어 처리한다(더 들어올 때까지 기다리지 않고 즉시 반환). net_run()의 메인 루프뿐 아니라,
+* net_run()이 반환한 뒤 main.c가 logic worker들의 종료를 기다리는 동안에도 호출된다 -
+* g_io_q의 유일한 소비자가 net_run()이라 net_run()이 먼저 끝나버리면, 아직 종료 처리 중인 worker가
+* JOB_CLOSE/JOB_SEND를 blocking push로 넣다가(job_queue_push_close/_send) 큐가 가득 찼을 때
+* 영원히 멈추고 pthread_join도 끝나지 않을 수 있다(main.c의 종료 시퀀스 참고) -
+* 그래서 net_run() 종료 후에도 이 함수를 계속 호출해 소비자 역할을 이어가게 한다
+*/
+void net_drain_io_queue(void)
+{
+	job_t job;
+	while (job_queue_pop(&g_io_q, &job, JOBQ_NONBLOCK)) {
+		if (job.type == JOB_SEND) {
+			handle_send_job(&job);
+		}
+		else if (job.type == JOB_CLOSE) {
+			close_connection(job.fd);
+		}
+		else if (job.type == JOB_REDIS_SUBSCRIBE) {
+			/* 실패를 무시하면 이 pod만 그 방의 cross-pod 메시지를 못 듣게 되는데 아무 흔적도
+			* 남지 않는다. 재시도는 하지 않고(프로젝트 정책) 로그만 남긴다 */
+			if (redis_subscribe_room(job.room_id) != 0) {
+				log_json("ERROR", "redis_subscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
+			}
+		}
+		else if (job.type == JOB_REDIS_UNSUBSCRIBE) {
+			if (redis_unsubscribe_room(job.room_id) != 0) {
+				log_json("ERROR", "redis_unsubscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
+			}
+		}
+	}
 }
 
 /*
@@ -452,27 +530,7 @@ void net_run() {
 		* IO 큐에 쌓인 작업 처리 (SEND: 실제 전송, CLOSE: logic 스레드가 정리를 끝낸 fd를 이제 close)
 		* 네트워크 전송/종료는 항상 네트워크 스레드에서 수행
 		*/
-		job_t job;
-		while (job_queue_pop(&g_io_q, &job, JOBQ_NONBLOCK)) {
-			if (job.type == JOB_SEND) {
-				handle_send_job(&job);
-			}
-			else if (job.type == JOB_CLOSE) {
-				close_connection(job.fd);
-			}
-			else if (job.type == JOB_REDIS_SUBSCRIBE) {
-				/* 실패를 무시하면 이 pod만 그 방의 cross-pod 메시지를 못 듣게 되는데 아무 흔적도
-				* 남지 않는다. 재시도는 하지 않고(프로젝트 정책) 로그만 남긴다 */
-				if (redis_subscribe_room(job.room_id) != 0) {
-					log_json("ERROR", "redis_subscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
-				}
-			}
-			else if (job.type == JOB_REDIS_UNSUBSCRIBE) {
-				if (redis_unsubscribe_room(job.room_id) != 0) {
-					log_json("ERROR", "redis_unsubscribe_failed", "room_id", LOG_ARG_INT, job.room_id, NULL);
-				}
-			}
-		}
+		net_drain_io_queue();
 
 		/* epoll로 전달된 각 이벤트 처리 */
 		for (int i = 0; i < n; ++i) {
@@ -486,12 +544,6 @@ void net_run() {
 					uint64_t v;
 					while (read(wake_fd, &v, sizeof(v)) > 0) {}
 				}
-				continue;
-			}
-
-			/* 메트릭/헬스체크 스크레이퍼 연결 처리 (채팅 연결과 다른 경로이므로 이후 로직으로 흘러가지 않도록 continue) */
-			if (fd == metrics_listen_fd) {
-				handle_metrics_accept();
 				continue;
 			}
 
@@ -509,8 +561,13 @@ void net_run() {
 				* publish가 올 때까지 그 메시지가 무한정 지연된다 (redis_client.h의 반환값 계약 참고)
 				*/
 				while ((rc = redis_sub_read(&room_id, &except_id, &pkt)) > 0) {
-					if (rc == 1)
-						job_queue_push_room_deliver(&g_logic_q, room_id, except_id, &pkt);
+					if (rc == 1) {
+						/* g_logic_q가 가득 차면(non-blocking push) 이 메시지 하나만 드롭된다 -
+						* 이 스레드(net 스레드)를 블록시키지 않는 게 더 중요함. job_queue.h 참고 */
+						if (job_queue_push_room_deliver(&g_logic_q, room_id, except_id, &pkt) != 0) {
+							log_json("ERROR", "room_deliver_job_dropped", "room_id", LOG_ARG_INT, room_id, NULL);
+						}
+					}
 				}
 
 				/*
@@ -644,8 +701,16 @@ void net_run() {
 							if (connection_closed)
 								break;
 
-							/* 파싱된 패킷을 로직 스레드로 전달 (fd가 아니라 session_id로 대상을 지정) */
-							job_queue_push_packet(&g_logic_q, conn->session_id, &pkt);
+							/*
+							* 파싱된 패킷을 로직 스레드로 전달 (fd가 아니라 session_id로 대상을 지정)
+							* g_logic_q가 가득 차면(non-blocking push) 이 패킷 하나만 드롭된다 -
+							* 네트워크 자체가 혼잡할 때 패킷을 잃는 것과 같은 급의 트레이드오프이고,
+							* 이 스레드(유일한 epoll 스레드)를 블록시켜 다른 모든 클라이언트의
+							* accept/recv/send까지 같이 멈추는 것보다는 낫다. job_queue.h 참고
+							*/
+							if (job_queue_push_packet(&g_logic_q, conn->session_id, &pkt) != 0) {
+								log_json("ERROR", "packet_job_dropped", "fd", LOG_ARG_INT, cfd, "session_id", LOG_ARG_INT, conn->session_id, NULL);
+							}
 
 							log_json("INFO", "packet_received",
 								"fd", LOG_ARG_INT, cfd,
@@ -710,6 +775,13 @@ void net_run() {
 
 		}
 	}
+
+	/*
+	* metrics 전담 스레드가 g_terminate를 보고 자기 poll 루프를 빠져나올 때까지 기다린다(최대 1초).
+	* 이 fd를 아직 쓰고 있을 수도 있는 스레드보다 먼저 close(metrics_listen_fd)를 하면 안 되므로
+	* 반드시 아래 close보다 앞에 와야 한다
+	*/
+	pthread_join(g_metrics_tid, NULL);
 
 	/* 서버 종료 시 listening 소켓 정리 */
 	if (listen_fd >= 0) {

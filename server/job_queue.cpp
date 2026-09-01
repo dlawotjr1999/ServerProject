@@ -90,13 +90,17 @@ int job_queue_depth(job_queue_t* q) {
 /* job 타입별로 필수 필드가 다르므로, 생성 규칙을 한 곳에 모음 */
 /* 또한, job_t의 내부 구조가 바뀌어도(필드 추가/초기화 규칙 변경) helper만 수정하면 됨 */
 
-/* 패킷 수신 이벤트를 job 형태(JOB_PACKET)로 만들어 큐에 삽입. fd가 아니라 session_id로 대상을 지정함 */
-void job_queue_push_packet(job_queue_t* q, int session_id, packet_t* pkt) {
+/*
+* 패킷 수신 이벤트를 job 형태(JOB_PACKET)로 만들어 큐에 삽입. fd가 아니라 session_id로 대상을 지정함
+* net 스레드(epoll 루프)가 직접 호출하므로 non-blocking(job_queue_try_push) - 이유는 job_queue.h의
+* 선언부 주석 참고. 0이면 push 성공, -1이면 g_logic_q가 가득 차서 이 패킷 하나가 드롭됐음
+*/
+int job_queue_push_packet(job_queue_t* q, int session_id, packet_t* pkt) {
 	job_t job{};
 	job.type = JOB_PACKET;
 	job.session_id = session_id;
 	job.packet = *pkt;
-	job_queue_push(q, &job);
+	return job_queue_try_push(q, &job);
 }
 
 /*
@@ -135,6 +139,13 @@ void job_queue_push_shutdown(job_queue_t* q) {
 	job_queue_push(q, &job);
 }
 
+/* job_queue_push_shutdown()의 non-blocking 버전 - job_queue.h 선언부 주석 참고 */
+int job_queue_try_push_shutdown(job_queue_t* q) {
+	job_t job{};
+	job.type = JOB_SHUTDOWN;
+	return job_queue_try_push(q, &job);
+}
+
 /* net 스레드에게 room_id 채널 구독을 시작하라는 job (3단계, logic -> net) */
 void job_queue_push_redis_subscribe(job_queue_t* q, int room_id) {
 	job_t job{};
@@ -159,12 +170,14 @@ int job_queue_push_redis_unsubscribe(job_queue_t* q, int room_id) {
 * Redis pub/sub으로 도착한 메시지를 로컬 멤버에게 전달하라는 job (3단계, net -> logic)
 * except_global_id는 job_t.session_id 필드를 재사용함(원 발신자를 배송 대상에서 제외하기 위함).
 * 담기는 값은 pod-로컬 session_id가 아니라 클러스터 전역 id(redis_next_global_id 발급분)다
+* 이 함수도 net 스레드가 직접 호출하므로 non-blocking(job_queue_try_push) - job_queue.h 참고.
+* 0이면 push 성공, -1이면 드롭(이 채팅 메시지가 이 pod의 로컬 멤버에게는 전달되지 않음)
 */
-void job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt) {
+int job_queue_push_room_deliver(job_queue_t* q, int room_id, int except_global_id, packet_t* pkt) {
 	job_t job{};
 	job.type = JOB_ROOM_DELIVER;
 	job.room_id = room_id;
 	job.session_id = except_global_id;
 	job.packet = *pkt;
-	job_queue_push(q, &job);
+	return job_queue_try_push(q, &job);
 }
