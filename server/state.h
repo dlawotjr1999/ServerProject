@@ -72,6 +72,12 @@ void room_broadcast_local(int room_id, int except_global_id, packet_t* pkt);   /
 int state_count_active_sessions(void);
 int state_count_active_rooms(void);
 
+/* 이 pod이 로컬 멤버를 갖고 있는 모든 방에 대해 Redis 하트비트를 갱신한다(3단계 lease/heartbeat
+* 복구 메커니즘) - net.c의 타이머가 주기적으로 호출한다. room_join()/room_leave()가 이미 인원
+* 변화 시점마다 즉시 하트비트를 보내지만, 인원 변화가 없어도(방이 그냥 계속 활성 상태여도)
+* lease가 만료되지 않도록 이 함수로 주기적으로 다시 갱신해야 한다 */
+void state_heartbeat_local_rooms(void);
+
 #ifdef __cplusplus
 }
 #endif

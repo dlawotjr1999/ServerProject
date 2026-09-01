@@ -13,6 +13,7 @@ extern "C" {
 	extern job_queue_t g_io_q;
 	void net_wakeup(void);
 	int redis_leave_room(int session_id, int room_id);   /* redis_client.cpp (3단계) */
+	int redis_room_heartbeat(int room_id, int local_count);   /* redis_client.cpp (3단계 lease/heartbeat 복구) */
 }
 
 /*
@@ -292,6 +293,7 @@ int room_join(room_t* room, session_t* s, bool* out_first_local_member)
 	bool joined = false;
 	bool first_local_member = false;
 	int joined_room_id = -1;
+	int local_count_after_join = 0;
 	{
 		PosixLockGuard rooms_lock(g_rooms_lock);
 		if (!room->live) return -1;
@@ -311,6 +313,7 @@ int room_join(room_t* room, session_t* s, bool* out_first_local_member)
 				joined = true;
 				joined_room_id = room->room_id;
 				first_local_member = (room->user_count == 1);
+				local_count_after_join = room->user_count;
 			}
 		}
 	}
@@ -318,6 +321,13 @@ int room_join(room_t* room, session_t* s, bool* out_first_local_member)
 	if (!joined) return -1;
 
 	log_json("INFO", "room_joined", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, joined_room_id, "first_local_member", LOG_ARG_INT, first_local_member ? 1 : 0, NULL);
+
+	/* Redis 왕복은 상태 락 밖에서 한다(room_leave의 redis_leave_room 호출과 동일한 패턴).
+	* 실패해도 로그만 남기고 join 자체는 성공으로 유지한다 - join은 이미 로컬/Redis 공유 카운터
+	* 양쪽에서 성공했으므로, 이 하트비트 실패로 되돌리면 안 된다(3단계 pod lease/heartbeat 복구) */
+	if (redis_room_heartbeat(joined_room_id, local_count_after_join) != 0) {
+		log_json("ERROR", "redis_room_heartbeat_failed", "room_id", LOG_ARG_INT, joined_room_id, NULL);
+	}
 
 	if (out_first_local_member) *out_first_local_member = first_local_member;
 	return 0;
@@ -342,6 +352,7 @@ void room_leave(session_t* s)
 
 	bool did_leave = false;
 	bool now_empty_local = false;
+	int local_count_after_leave = 0;
 	{
 		PosixLockGuard rooms_lock(g_rooms_lock);
 		room_t* room = &rooms[room_id];
@@ -366,6 +377,7 @@ void room_leave(session_t* s)
 			}
 
 			now_empty_local = (room->user_count == 0);
+			local_count_after_leave = room->user_count;
 			if (now_empty_local) {
 				room->live = false;
 			}
@@ -413,6 +425,13 @@ void room_leave(session_t* s)
 		* 않으므로(=MAX_ROOMS 고정 상한의 영구 잠식), 최소한 로그는 남긴다(재시도는 하지 않음) */
 		if (redis_leave_room(s->session_id, room_id) != 0) {
 			log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
+		}
+
+		/* 이 pod의 이 방에 대한 로컬 기여분을 갱신/반납한다(3단계 pod lease/heartbeat 복구).
+		* local_count_after_leave가 0이면(이 pod에서 이 방의 로컬 멤버가 전부 빠짐) redis_room_heartbeat가
+		* room:{id}:pods/count/lease 세 키를 TTL을 기다리지 않고 즉시 정리한다 */
+		if (redis_room_heartbeat(room_id, local_count_after_leave) != 0) {
+			log_json("ERROR", "redis_room_heartbeat_failed", "room_id", LOG_ARG_INT, room_id, NULL);
 		}
 
 		log_json("INFO", "room_left", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, "local_empty", LOG_ARG_INT, now_empty_local ? 1 : 0, NULL);
@@ -477,4 +496,38 @@ int state_count_active_rooms(void)
 		if (rooms[i].user_count > 0) count++;
 	}
 	return count;
+}
+
+/*
+* 이 pod이 로컬 멤버를 갖고 있는 모든 방에 대해 Redis 하트비트를 다시 갱신하는 함수(3단계
+* pod lease/heartbeat 복구) - net.c의 10초 타이머가 주기적으로 호출한다. room_join()/room_leave()가
+* 인원 변화 시점마다 이미 즉시 하트비트를 보내지만, 방이 그냥 계속 활성 상태여서 인원 변화가 없어도
+* 30초 lease가 만료되지 않도록 이 함수가 필요하다
+*/
+void state_heartbeat_local_rooms(void)
+{
+	/* room->lock을 쥔 채로 Redis 호출을 하지 않기 위해, 먼저 (room_id, user_count) 목록만
+	* 수집하고 락을 다 놓은 뒤에 하트비트를 보낸다 - room_broadcast_local()이 대상 목록을
+	* 수집한 뒤 락 밖에서 job_queue_push_send()를 호출하는 것과 같은 패턴 */
+	struct { int room_id; int user_count; } live_rooms[MAX_ROOMS];
+	int count = 0;
+
+	{
+		PosixLockGuard lock(g_rooms_lock);
+		for (int i = 0; i < MAX_ROOMS; ++i) {
+			if (!rooms[i].live) continue;
+			PosixLockGuard room_lock(rooms[i].lock);
+			if (rooms[i].user_count > 0) {
+				live_rooms[count].room_id = rooms[i].room_id;
+				live_rooms[count].user_count = rooms[i].user_count;
+				count++;
+			}
+		}
+	}
+
+	for (int i = 0; i < count; ++i) {
+		if (redis_room_heartbeat(live_rooms[i].room_id, live_rooms[i].user_count) != 0) {
+			log_json("ERROR", "redis_room_heartbeat_failed", "room_id", LOG_ARG_INT, live_rooms[i].room_id, NULL);
+		}
+	}
 }

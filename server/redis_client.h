@@ -73,6 +73,19 @@ int redis_sub_read(int* out_room_id, int* out_except_id, packet_t* out_pkt);
 */
 int redis_next_global_id(int* out_global_id);
 
+/*
+* 이 pod이 room_id에 대해 현재 갖고 있는 로컬 멤버 수(local_count)를 Redis에 하트비트로 알린다.
+* local_count > 0이면: 이 pod을 room:{id}:pods SET에 등록하고, room:{id}:pod:{pod_id}:count를
+* local_count로 갱신하고, room:{id}:pod:{pod_id}:lease를 30초 TTL로 (재)설정한다.
+* local_count == 0이면(이 pod에서 이 방의 로컬 멤버가 전부 빠짐): 위 세 키를 즉시 정리한다(SET에서
+* 빼고, count/lease 키를 지운다) - TTL 만료를 기다릴 필요 없이 곧바로 반납.
+* 두 트리거 지점에서 호출된다: (1) state.cpp의 room_join()/room_leave()가 로컬 인원이 바뀔 때마다
+* 즉시, (2) 인원 변화가 없어도 lease가 만료되지 않도록 주기적으로(net.c의 타이머).
+* 실패해도 재시도하지 않는다(이 프로젝트의 기존 정책) - 로그만 남기고 그냥 다음 호출을 기다린다.
+* 성공하면 0, 실패하면 -1을 반환한다
+*/
+int redis_room_heartbeat(int room_id, int local_count);
+
 #ifdef __cplusplus
 }
 #endif

@@ -24,10 +24,18 @@ static bool g_cmd_scripts_loaded = true;
 static char g_join_sha[41];
 static char g_leave_sha[41];
 
+/* 이 pod의 안정적인 식별자 - room:*:pod:{이 값}:* 키에 씀. HOSTNAME은 k8s가 pod 이름으로 채워주는
+* 표준 환경변수. 로컬/비-k8s 테스트에서는 없을 수 있어 getpid() 기반 값으로 대체한다 */
+static char g_pod_id[64];
+
 /*
 * 매치메이킹: 기존 로컬 room_free_list/room_count(REDESIGN.md 참고)와 동일한 정책을 그대로 복제한다.
 * 1) freelist에 반납된 방이 있으면 재사용 (room_leave 스크립트가 count 0일 때만 반납하므로 항상 비어있음)
 * 2) 없으면 이미 만들어진 방들(0..next_id-1) 중 인원 여유가 있는 방을 순차 탐색
+*    - 탐색 전에, 그 방에 기여했던 pod들의 lease(room:{id}:pod:{pid}:lease)를 훑어 만료된(=크래시한)
+*      pod의 마지막 기여분을 room:{id}:count에서 미리 걷어낸다(3단계: pod lease/heartbeat 복구).
+*      정상 종료한 pod은 redis_room_heartbeat(0)이 자기 키를 즉시 지우므로 여기 남아있지 않는다 -
+*      여기 남아 lease가 만료된 pod id는 오직 비정상 종료(SIGKILL/OOM/노드 유실)한 경우뿐이다
 * 3) 그래도 없으면 새로 채번(MAX_ROOMS 초과 시 -1)
 */
 static const char* k_join_script =
@@ -40,9 +48,24 @@ static const char* k_join_script =
 	"local max_user = tonumber(ARGV[2])\n"
 	"local next_id = tonumber(redis.call('GET', 'room_next_id') or '0')\n"
 	"for i = 0, next_id - 1 do\n"
-	"  local cnt = tonumber(redis.call('GET', 'room:' .. i .. ':count') or '-1')\n"
+	"  local room_key = 'room:' .. i\n"
+	"  local pods_key = room_key .. ':pods'\n"
+	"  local pod_ids = redis.call('SMEMBERS', pods_key)\n"
+	"  for _, pid in ipairs(pod_ids) do\n"
+	"    local lease_key = room_key .. ':pod:' .. pid .. ':lease'\n"
+	"    if redis.call('EXISTS', lease_key) == 0 then\n"
+	"      local count_key = room_key .. ':pod:' .. pid .. ':count'\n"
+	"      local stale = tonumber(redis.call('GET', count_key) or '0')\n"
+	"      if stale > 0 then\n"
+	"        redis.call('DECRBY', room_key .. ':count', stale)\n"
+	"      end\n"
+	"      redis.call('DEL', count_key)\n"
+	"      redis.call('SREM', pods_key, pid)\n"
+	"    end\n"
+	"  end\n"
+	"  local cnt = tonumber(redis.call('GET', room_key .. ':count') or '-1')\n"
 	"  if cnt >= 0 and cnt < max_user then\n"
-	"    redis.call('INCR', 'room:' .. i .. ':count')\n"
+	"    redis.call('INCR', room_key .. ':count')\n"
 	"    return i\n"
 	"  end\n"
 	"end\n"
@@ -102,6 +125,16 @@ static bool load_matchmaking_scripts(void)
 
 int redis_client_init(const char* host, int port)
 {
+	/* 이 pod의 안정적인 식별자를 한 번만 정해둔다(3단계 pod lease/heartbeat 복구) - HOSTNAME은
+	* k8s가 pod 이름으로 채워주는 표준 환경변수. 로컬/비-k8s 테스트처럼 없을 수 있는 환경에서는
+	* getpid() 기반 값으로 대체해 null pod id로 인한 크래시 없이 로컬 테스트가 되게 한다 */
+	const char* hostname_env = getenv("HOSTNAME");
+	if (hostname_env && hostname_env[0] != '\0') {
+		snprintf(g_pod_id, sizeof(g_pod_id), "%s", hostname_env);
+	} else {
+		snprintf(g_pod_id, sizeof(g_pod_id), "local-%d", (int)getpid());
+	}
+
 	/*
 	* 명령용 연결에는 연결/읽기/쓰기 타임아웃을 반드시 걸어둔다.
 	* g_redis_cmd는 logic worker 4개가 g_redis_cmd_lock으로 직렬화해 쓰는 "유일한" 명령 커넥션이라,
@@ -239,6 +272,48 @@ int redis_leave_room(int session_id, int room_id)
 	int ok = (reply->type == REDIS_REPLY_INTEGER) ? 0 : -1;
 	freeReplyObject(reply);
 	return ok;
+}
+
+/*
+* 이 pod이 room_id에 대해 갖고 있는 로컬 멤버 수를 하트비트로 알린다(3단계 pod lease/heartbeat
+* 복구) - 상세 설명은 redis_client.h 참고. 원자적 Lua 스크립트가 아니라 3개의 개별 명령으로
+* 처리한다 - 이 파일의 기존 정책대로, 부분 실패는 다음 하트비트에서 스스로 교정되는 지연일 뿐이지
+* 정합성 버그가 아니기 때문이다(redis_client_init()의 3단계 초기화 시퀀스와 동일한 전제)
+*/
+int redis_room_heartbeat(int room_id, int local_count)
+{
+	/* count_key/lease_key는 "room:<room_id>:pod:<g_pod_id>:count|lease" 형태 - room_id(int, 최악
+	* 11자리)와 g_pod_id(최대 63자)를 모두 감안해, -Wformat-truncation이 오탐하지 않을 만큼
+	* 넉넉하게 잡는다(pods_key는 g_pod_id를 포맷 문자열에 안 쓰므로 그대로 48이면 충분) */
+	char pods_key[48], count_key[128], lease_key[128];
+	snprintf(pods_key, sizeof(pods_key), "room:%d:pods", room_id);
+	snprintf(count_key, sizeof(count_key), "room:%d:pod:%s:count", room_id, g_pod_id);
+	snprintf(lease_key, sizeof(lease_key), "room:%d:pod:%s:lease", room_id, g_pod_id);
+
+	PosixLockGuard lock(g_redis_cmd_lock);
+	if (!ensure_cmd_connected()) return -1;
+
+	if (local_count > 0) {
+		redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SADD %s %s", pods_key, g_pod_id);
+		if (r1) freeReplyObject(r1); else return -1;
+
+		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SET %s %d", count_key, local_count);
+		if (r2) freeReplyObject(r2); else return -1;
+
+		redisReply* r3 = (redisReply*)redisCommand(g_redis_cmd, "SET %s 1 EX 30", lease_key);
+		if (r3) freeReplyObject(r3); else return -1;
+	} else {
+		redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SREM %s %s", pods_key, g_pod_id);
+		if (r1) freeReplyObject(r1); else return -1;
+
+		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "DEL %s", count_key);
+		if (r2) freeReplyObject(r2); else return -1;
+
+		redisReply* r3 = (redisReply*)redisCommand(g_redis_cmd, "DEL %s", lease_key);
+		if (r3) freeReplyObject(r3); else return -1;
+	}
+
+	return 0;
 }
 
 int redis_next_global_id(int* out_global_id)

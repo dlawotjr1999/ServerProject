@@ -1,4 +1,5 @@
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <poll.h>
 
 #include "common.h"
@@ -14,6 +15,7 @@ static int listen_fd = -1;
 static int metrics_listen_fd = -1;
 static int epfd = -1;
 static int wake_fd = -1;
+static int heartbeat_timer_fd = -1;
 
 /* 메트릭/헬스체크 전담 스레드(아래 metrics_thread_main 참고) - net_init()이 생성, net_run() 종료 시 join */
 static pthread_t g_metrics_tid;
@@ -447,6 +449,29 @@ int net_init() {
 	ev.data.fd = redis_client_sub_fd();
 	epoll_ctl(epfd, EPOLL_CTL_ADD, redis_client_sub_fd(), &ev);
 
+	/*
+	* Redis room 하트비트(3단계 lease/heartbeat 복구 메커니즘)를 주기적으로 트리거하는 타이머.
+	* lease TTL이 30초이므로, 최소 그 절반 이하 주기로 갱신해야 타이밍 지터가 있어도 안전하다 -
+	* 10초로 잡아 3배 여유를 둠
+	*/
+	heartbeat_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+	if (heartbeat_timer_fd < 0) {
+		perror("timerfd_create error");
+		return -1;
+	}
+	struct itimerspec its;
+	its.it_value.tv_sec = 10;
+	its.it_value.tv_nsec = 0;
+	its.it_interval.tv_sec = 10;
+	its.it_interval.tv_nsec = 0;
+	if (timerfd_settime(heartbeat_timer_fd, 0, &its, NULL) < 0) {
+		perror("timerfd_settime error");
+		return -1;
+	}
+	ev.events = EPOLLIN;
+	ev.data.fd = heartbeat_timer_fd;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, heartbeat_timer_fd, &ev);
+
 	/* 채팅용/메트릭용 리스닝 소켓이 모두 bind에 성공했으므로 이 시점부터 준비 완료로 표시 */
 	g_net_ready = true;
 
@@ -544,6 +569,16 @@ void net_run() {
 					uint64_t v;
 					while (read(wake_fd, &v, sizeof(v)) > 0) {}
 				}
+				continue;
+			}
+
+			/* Redis room 하트비트 타이머 발화 (3단계 lease/heartbeat 복구) - level-trigger epoll이라
+			* 다음에도 즉시 재발화하지 않도록 만료 횟수를 읽어 비운 뒤, 로컬 멤버가 있는 모든 방의
+			* lease를 갱신한다 */
+			if (fd == heartbeat_timer_fd) {
+				uint64_t expirations;
+				while (read(heartbeat_timer_fd, &expirations, sizeof(expirations)) > 0) {}
+				state_heartbeat_local_rooms();
 				continue;
 			}
 
@@ -792,6 +827,11 @@ void net_run() {
 	if (metrics_listen_fd >= 0) {
 		close(metrics_listen_fd);
 		metrics_listen_fd = -1;
+	}
+	/* Redis room 하트비트 타이머 fd도 함께 정리 (3단계 lease/heartbeat 복구) */
+	if (heartbeat_timer_fd >= 0) {
+		close(heartbeat_timer_fd);
+		heartbeat_timer_fd = -1;
 	}
 
 	/*
