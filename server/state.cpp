@@ -155,6 +155,23 @@ int session_get_room_id(session_t* s)
 	return s->room_id;
 }
 
+/* global_id를 락 보호 하에 안전하게 쓰는 함수 (leave->rejoin이 in-flight PKT_CHAT과 겹칠 때
+* 락 없이 읽고 쓰던 문제를 다른 session 필드들과 같은 방식으로 닫음) */
+void session_set_global_id(session_t* s, int global_id)
+{
+	if (!s) return;
+	PosixLockGuard lock(s->lock);
+	s->global_id = global_id;
+}
+
+/* global_id를 락 보호 하에 안전하게 읽는 함수 */
+int session_get_global_id(session_t* s)
+{
+	if (!s) return -1;
+	PosixLockGuard lock(s->lock);
+	return s->global_id;
+}
+
 /*
 * alive를 false로 내리고, 그 순간의 room_id를 원자적으로(같은 lock 구간 안에서) 함께 반환하는 함수
 *
@@ -427,7 +444,7 @@ void room_broadcast_local(int room_id, int except_global_id, packet_t* pkt)
 			session_t* s = room->users[i];
 			if (!s) continue;
 			if (!session_is_alive(s)) continue;
-			if (s->global_id == except_global_id) continue;   /* pod-로컬 session_id가 아니라 클러스터 전역 id로 비교해야 함(3단계 버그 수정) */
+			if (session_get_global_id(s) == except_global_id) continue;   /* pod-로컬 session_id가 아니라 클러스터 전역 id로 비교해야 함(3단계 버그 수정) */
 			target_ids[count++] = s->session_id;
 		}
 	}

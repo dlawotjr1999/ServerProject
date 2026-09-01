@@ -136,12 +136,15 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		/* cross-pod pub/sub 자기 자신 제외 판정에 쓸 클러스터 전역 id 발급 (3단계 버그 수정) -
 		* 로컬 session_id는 pod마다 독립적으로 증가해 클러스터 전역에서 유일하지 않아, 서로 다른 pod의
 		* 세션이 우연히 같은 session_id를 가지면 상대 pod이 자기 메시지로 착각해 걸러버리는 문제가 있었음 */
-		if (redis_next_global_id(&s->global_id) != 0) {
+		int global_id;
+		if (redis_next_global_id(&global_id) != 0) {
 			log_json("ERROR", "redis_global_id_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			if (redis_leave_room(s->session_id, room_id) != 0)
 				log_json("ERROR", "redis_leave_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			break;
 		}
+		/* s->lock 보호 하에 기록 - leave->rejoin이 in-flight PKT_CHAT과 겹칠 때의 락 없는 읽기/쓰기 회피 */
+		session_set_global_id(s, global_id);
 
 		/* 입장 자체가 실패하는 경우(처리 중 세션이 죽었거나 방이 이미 꽉 참)도 자리를 반납해야 한다.
 		* 예전에는 room_join이 first_local_member만 돌려줘서 이 실패가 아예 보이지 않았음 */
@@ -188,7 +191,7 @@ static void handle_packet(session_t* s, packet_t* pkt) {
 		out.type = PKT_CHAT;
 		out.length = 2 + (uint16_t)n;
 
-		if (redis_publish_chat(room_id, s->global_id, &out) != 0) {
+		if (redis_publish_chat(room_id, session_get_global_id(s), &out) != 0) {
 			log_json("ERROR", "redis_publish_failed", "session_id", LOG_ARG_INT, s->session_id, "room_id", LOG_ARG_INT, room_id, NULL);
 			break;
 		}

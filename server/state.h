@@ -47,6 +47,8 @@ void session_release(session_t* s);
 void session_remove_by_id(int session_id);
 bool session_is_alive(session_t* s);
 int session_get_room_id(session_t* s);  /* room_id를 락 보호 하에 안전하게 읽음 */
+void session_set_global_id(session_t* s, int global_id);   /* global_id를 락 보호 하에 안전하게 씀 */
+int session_get_global_id(session_t* s);                    /* global_id를 락 보호 하에 안전하게 읽음 */
 int session_deactivate(session_t* s);   /* alive=false로 내리고, 그 순간의 room_id를 원자적으로 함께 반환 */
 void session_remove_all(void);   /* 서버 종료 시 남아있는 모든 세션을 방에서 빼고 정리 */
 
