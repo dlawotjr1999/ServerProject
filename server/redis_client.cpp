@@ -16,6 +16,10 @@ static redisContext* g_redis_cmd = nullptr;
 static redisContext* g_redis_sub = nullptr;
 static pthread_mutex_t g_redis_cmd_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* g_redis_cmd가 재연결된 뒤 매치메이킹 스크립트를 아직 다시 로드하지 못한 상태인지 추적한다.
+* redis_client_init()이 이미 로드해뒀으므로 시작 값은 true */
+static bool g_cmd_scripts_loaded = true;
+
 /* SCRIPT LOAD로 미리 등록해두고, 매 호출은 EVALSHA로 스크립트 본문 재전송 없이 실행한다 */
 static char g_join_sha[41];
 static char g_leave_sha[41];
@@ -67,6 +71,35 @@ static bool set_nonblocking_fd(int fd)
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+/*
+* 매치메이킹 스크립트 2개를 SCRIPT LOAD로 등록해 g_join_sha/g_leave_sha를 채운다.
+* 최초 연결 시(redis_client_init)와, 끊긴 연결을 재연결한 뒤(ensure_cmd_connected) 둘 다에서 쓰인다 -
+* 재연결이 완전히 새로운/재시작된 Redis 프로세스로 붙었을 수도 있어서, 그런 경우 기존에 캐시해둔
+* SHA는 그 프로세스에 없으므로(NOSCRIPT) 매번 다시 로드해야 한다
+*/
+static bool load_matchmaking_scripts(void)
+{
+	redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SCRIPT LOAD %s", k_join_script);
+	if (!r1 || r1->type != REDIS_REPLY_STRING) {
+		log_json("ERROR", "redis_script_load_failed", "which", LOG_ARG_STR, "join", NULL);
+		if (r1) freeReplyObject(r1);
+		return false;
+	}
+	snprintf(g_join_sha, sizeof(g_join_sha), "%s", r1->str);
+	freeReplyObject(r1);
+
+	redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SCRIPT LOAD %s", k_leave_script);
+	if (!r2 || r2->type != REDIS_REPLY_STRING) {
+		log_json("ERROR", "redis_script_load_failed", "which", LOG_ARG_STR, "leave", NULL);
+		if (r2) freeReplyObject(r2);
+		return false;
+	}
+	snprintf(g_leave_sha, sizeof(g_leave_sha), "%s", r2->str);
+	freeReplyObject(r2);
+
+	return true;
+}
+
 int redis_client_init(const char* host, int port)
 {
 	/*
@@ -113,23 +146,7 @@ int redis_client_init(const char* host, int port)
 		return -1;
 	}
 
-	redisReply* r1 = (redisReply*)redisCommand(g_redis_cmd, "SCRIPT LOAD %s", k_join_script);
-	if (!r1 || r1->type != REDIS_REPLY_STRING) {
-		log_json("ERROR", "redis_script_load_failed", "which", LOG_ARG_STR, "join", NULL);
-		if (r1) freeReplyObject(r1);
-		return -1;
-	}
-	snprintf(g_join_sha, sizeof(g_join_sha), "%s", r1->str);
-	freeReplyObject(r1);
-
-	redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SCRIPT LOAD %s", k_leave_script);
-	if (!r2 || r2->type != REDIS_REPLY_STRING) {
-		log_json("ERROR", "redis_script_load_failed", "which", LOG_ARG_STR, "leave", NULL);
-		if (r2) freeReplyObject(r2);
-		return -1;
-	}
-	snprintf(g_leave_sha, sizeof(g_leave_sha), "%s", r2->str);
-	freeReplyObject(r2);
+	if (!load_matchmaking_scripts()) return -1;
 
 	log_json("INFO", "redis_client_ready", "host", LOG_ARG_STR, host, "port", LOG_ARG_INT, port, NULL);
 	return 0;
@@ -146,12 +163,50 @@ void redis_client_shutdown(void)
 	if (g_redis_sub) { redisFree(g_redis_sub); g_redis_sub = nullptr; }
 }
 
+/*
+* g_redis_cmd 호출 전에 매번 거치는 지연 복구(lazy recovery) 함수.
+* 정상 상태면 아무 것도 하지 않고 즉시 true를 반환한다(핫 패스에 비용 없음).
+* 연결이 에러 상태(타임아웃/끊김)면 redisReconnect()로 한 번만 재연결을 시도하고, 성공하면
+* redisSetTimeout()으로 타임아웃을 다시 걸고 매치메이킹 스크립트도 다시 로드한다 - redisReconnect()는
+* 소켓만 새로 열 뿐 타임아웃 설정이나 SCRIPT LOAD로 캐시해둔 SHA를 되살려주지 않기 때문이다.
+* 재시도 루프가 아니다 - 이 한 번의 시도가 실패하면 이 호출은 실패로 끝나고(false 반환, 호출부가
+* 로그 남기고 그 요청만 실패시킴), 다음 호출이 왔을 때 다시 한 번 시도한다.
+* 반드시 g_redis_cmd_lock을 쥔 상태에서 호출해야 한다
+*/
+static bool ensure_cmd_connected(void)
+{
+	if (!g_redis_cmd) return false;
+
+	if (g_redis_cmd->err) {
+		if (redisReconnect(g_redis_cmd) != REDIS_OK) {
+			log_json("ERROR", "redis_cmd_reconnect_failed", NULL);
+			return false;
+		}
+
+		struct timeval redis_cmd_timeout = { 3, 0 };
+		if (redisSetTimeout(g_redis_cmd, redis_cmd_timeout) != REDIS_OK) {
+			log_json("ERROR", "redis_set_timeout_failed", "which", LOG_ARG_STR, "cmd", NULL);
+			return false;
+		}
+
+		log_json("INFO", "redis_cmd_reconnected", NULL);
+		g_cmd_scripts_loaded = false;   /* 재연결했으니 스크립트도 다시 로드해야 함 */
+	}
+
+	if (!g_cmd_scripts_loaded) {
+		if (!load_matchmaking_scripts()) return false;
+		g_cmd_scripts_loaded = true;
+	}
+
+	return true;
+}
+
 int redis_join_room(int session_id, int* out_room_id)
 {
 	(void)session_id;   /* 지금 스크립트는 세션별 정보를 쓰지 않지만, 로깅/확장 여지를 위해 인터페이스에 남겨둠 */
 
 	PosixLockGuard lock(g_redis_cmd_lock);
-	if (!g_redis_cmd) return -1;   /* 종료 절차에서 이미 정리된 연결 - 이 요청 하나만 실패시킨다 */
+	if (!ensure_cmd_connected()) return -1;   /* 종료 절차에서 정리됐거나(g_redis_cmd==nullptr), 재연결/스크립트 재로드가 실패한 경우 - 이 요청 하나만 실패시킨다 */
 
 	redisReply* reply = (redisReply*)redisCommand(g_redis_cmd,
 		"EVALSHA %s 0 %d %d", g_join_sha, MAX_ROOMS, MAX_ROOM_USER);
@@ -171,7 +226,7 @@ int redis_leave_room(int session_id, int room_id)
 	(void)session_id;
 
 	PosixLockGuard lock(g_redis_cmd_lock);
-	if (!g_redis_cmd) return -1;   /* 종료 절차에서 이미 정리된 연결 - 이 요청 하나만 실패시킨다 */
+	if (!ensure_cmd_connected()) return -1;   /* 종료 절차에서 정리됐거나(g_redis_cmd==nullptr), 재연결/스크립트 재로드가 실패한 경우 - 이 요청 하나만 실패시킨다 */
 
 	redisReply* reply = (redisReply*)redisCommand(g_redis_cmd,
 		"EVALSHA %s 0 %d", g_leave_sha, room_id);
@@ -185,7 +240,7 @@ int redis_leave_room(int session_id, int room_id)
 int redis_next_global_id(int* out_global_id)
 {
 	PosixLockGuard lock(g_redis_cmd_lock);
-	if (!g_redis_cmd) return -1;   /* 종료 절차에서 이미 정리된 연결 - 이 요청 하나만 실패시킨다 */
+	if (!ensure_cmd_connected()) return -1;   /* 종료 절차에서 정리됐거나(g_redis_cmd==nullptr), 재연결/스크립트 재로드가 실패한 경우 - 이 요청 하나만 실패시킨다 */
 
 	redisReply* reply = (redisReply*)redisCommand(g_redis_cmd, "INCR global_session_seq");
 	if (!reply) return -1;
@@ -223,7 +278,7 @@ int redis_publish_chat(int room_id, int except_global_id, const packet_t* pkt)
 	snprintf(channel, sizeof(channel), "room:%d", room_id);
 
 	PosixLockGuard lock(g_redis_cmd_lock);
-	if (!g_redis_cmd) return -1;   /* 종료 절차에서 이미 정리된 연결 - 이 요청 하나만 실패시킨다 */
+	if (!ensure_cmd_connected()) return -1;   /* 종료 절차에서 정리됐거나(g_redis_cmd==nullptr), 재연결/스크립트 재로드가 실패한 경우 - 이 요청 하나만 실패시킨다 */
 
 	/* %b: hiredis의 바이너리 세이프 인자 지정자 (const char*, size_t) */
 	redisReply* reply = (redisReply*)redisCommand(g_redis_cmd, "PUBLISH %s %b", channel, buf, off);
