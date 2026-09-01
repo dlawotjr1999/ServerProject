@@ -183,6 +183,11 @@ static bool ensure_cmd_connected(void)
 			return false;
 		}
 
+		/* 재연결 성공 시점에 바로 내려야 한다 - 이 아래 redisSetTimeout()이 실패해서 여기서
+		* return false 하더라도, 다음 호출이 (err가 이미 지워져 재연결 분기를 안 타는 채로)
+		* 스크립트를 다시 로드하지 않고 넘어가는 걸 막기 위함 */
+		g_cmd_scripts_loaded = false;
+
 		struct timeval redis_cmd_timeout = { 3, 0 };
 		if (redisSetTimeout(g_redis_cmd, redis_cmd_timeout) != REDIS_OK) {
 			log_json("ERROR", "redis_set_timeout_failed", "which", LOG_ARG_STR, "cmd", NULL);
@@ -190,7 +195,6 @@ static bool ensure_cmd_connected(void)
 		}
 
 		log_json("INFO", "redis_cmd_reconnected", NULL);
-		g_cmd_scripts_loaded = false;   /* 재연결했으니 스크립트도 다시 로드해야 함 */
 	}
 
 	if (!g_cmd_scripts_loaded) {
