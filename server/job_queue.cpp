@@ -103,6 +103,14 @@ int job_queue_push_packet(job_queue_t* q, int session_id, packet_t* pkt) {
 	return job_queue_try_push(q, &job);
 }
 
+void job_queue_push_packet_blocking(job_queue_t* q, int session_id, packet_t* pkt) {
+	job_t job{};
+	job.type = JOB_PACKET;
+	job.session_id = session_id;
+	job.packet = *pkt;
+	job_queue_push(q, &job);
+}
+
 /*
 * 연결 종료 이벤트를 job 형태(JOB_DISCONNECT)로 만들어 큐에 삽입
 * session_id는 logic 스레드가 세션을 정리할 대상, fd는 그 정리가 끝난 뒤 net 스레드가 close할 대상

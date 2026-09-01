@@ -741,12 +741,18 @@ void net_run() {
 
 							/*
 							* 파싱된 패킷을 로직 스레드로 전달 (fd가 아니라 session_id로 대상을 지정)
-							* g_logic_q가 가득 차면(non-blocking push) 이 패킷 하나만 드롭된다 -
-							* 네트워크 자체가 혼잡할 때 패킷을 잃는 것과 같은 급의 트레이드오프이고,
-							* 이 스레드(유일한 epoll 스레드)를 블록시켜 다른 모든 클라이언트의
-							* accept/recv/send까지 같이 멈추는 것보다는 낫다. job_queue.h 참고
+							* CHAT처럼 "잃어도 그만"인 패킷은 non-blocking push로 넘긴다 - g_logic_q가
+							* 가득 차면 이 패킷 하나만 드롭된다. 네트워크 자체가 혼잡할 때 패킷을 잃는
+							* 것과 같은 급의 트레이드오프이고, 이 스레드(유일한 epoll 스레드)를 블록시켜
+							* 다른 모든 클라이언트의 accept/recv/send까지 같이 멈추는 것보다는 낫다.
+							* 반면 JOIN/LEAVE처럼 상태를 바꾸는 저빈도 요청은 blocking push로 넘긴다 -
+							* 이 프로토콜엔 ACK/재시도가 없어서, 드롭되면 클라이언트가 응답 없이 영원히
+							* 기다리게 된다. job_queue.h 참고
 							*/
-							if (job_queue_push_packet(&g_logic_q, conn->session_id, &pkt) != 0) {
+							if (pkt.type == PKT_JOIN_ROOM || pkt.type == PKT_LEAVE_ROOM) {
+								job_queue_push_packet_blocking(&g_logic_q, conn->session_id, &pkt);
+							}
+							else if (job_queue_push_packet(&g_logic_q, conn->session_id, &pkt) != 0) {
 								log_json("ERROR", "packet_job_dropped", "fd", LOG_ARG_INT, cfd, "session_id", LOG_ARG_INT, conn->session_id, NULL);
 							}
 

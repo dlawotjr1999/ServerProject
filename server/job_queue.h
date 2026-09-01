@@ -76,6 +76,14 @@ int job_queue_depth(job_queue_t* q);
 * 않는다. 0이면 push 성공, -1이면 드롭(호출자가 로그만 남기면 됨) */
 int job_queue_push_packet(job_queue_t* q, int session_id, packet_t* pkt);
 /*
+* JOIN/LEAVE 등 상태를 바꾸는 패킷 전용 blocking 버전 - job_queue_push_disconnect()와 같은 이유다:
+* 이런 요청이 드롭되면 클라이언트는 응답도 재시도 방법도 없이 영원히 대기하게 된다(이 프로토콜에는
+* ACK/재시도가 없음) - CHAT처럼 "잃어도 그만"인 트래픽이 아니다. job_queue_push_packet()이 이미
+* non-blocking으로 g_logic_q 트래픽의 대부분(CHAT)을 덜어냈으므로, 상대적으로 저빈도인 JOIN/LEAVE
+* 요청까지 blocking으로 남겨도 이 스레드가 큐 포화로 막힐 위험은 낮다
+*/
+void job_queue_push_packet_blocking(job_queue_t* q, int session_id, packet_t* pkt);
+/*
 * 위 job_queue_push_packet()과 달리 이 함수는 여전히 blocking(job_queue_push)이다 - 의도적인
 * 비대칭이다. JOB_DISCONNECT를 드롭하면 logic 스레드가 그 세션을 영영 정리하지 않아 session_t가
 * 누수되고, 이미 죽은 fd가 방의 유저 목록에 그대로 남아 나중에 엉뚱한(재사용된) fd로 브로드캐스트를
