@@ -118,22 +118,25 @@ kubectl exec redis-0 -- redis-cli SMEMBERS room:0:pods   # 죽은 pod 흔적 사
 
 지금까지는 "동작한다"를 보여줬다면, 이 막은 "얼마나 버티는지"를 숫자로 보여줍니다.
 `client/loadtest.py`가 이 프로젝트 전용으로 만든 부하 테스트 도구입니다 — 여러 클라이언트를
-스레드로 동시에 띄워서 join → chat(N개, 송신 시각을 payload에 실음) → leave를 반복하고, 수신
-측에서 왕복(브로드캐스트) 레이턴시를 계산합니다. 같은 파이썬 프로세스 안에서 전부 돌기 때문에
-`time.time()` 하나로 모든 클라이언트의 시계가 자동으로 동기화되어 있어, 별도 시계 동기화 없이도
-정확한 end-to-end 레이턴시를 잴 수 있습니다.
+`asyncio` 태스크로 동시에 띄워서 join → chat(N개, 송신 시각을 payload에 실음) → leave를
+반복하고, 수신 측에서 왕복(브로드캐스트) 레이턴시를 계산합니다. 같은 파이썬 프로세스 안에서
+전부 돌기 때문에 `time.time()` 하나로 모든 클라이언트의 시계가 자동으로 동기화되어 있어, 별도
+시계 동기화 없이도 정확한 end-to-end 레이턴시를 잴 수 있습니다. (처음엔 `threading`으로
+만들었다가, GIL 경합이 서버보다 먼저 병목이 되어 측정값이 왜곡되는 걸 발견하고 `asyncio`로
+다시 만들었습니다 — 이 과정 자체도 PORTFOLIO.md "성능" 절에 남겨뒀습니다.)
 
 ### 기본 사용법
 
 ```bash
 # 서버 + Redis가 떠 있는 상태에서 (로컬이면 REDIS_HOST를 127.0.0.1로 임시 변경 필요 - server/common.h 참고)
-python3 client/loadtest.py --host 127.0.0.1 --port 3800 --clients 100 --messages 20
+python3 client/loadtest.py --host 127.0.0.1 --port 3800 --clients 300 --messages 20
 ```
 
 `--clients`(동시 연결 수), `--messages`(클라이언트당 전송 메시지 수), `--send-interval`(같은
 클라이언트의 메시지 간 간격)을 조절할 수 있습니다. 방 하나의 정원(`MAX_ROOM_USER=4`)이 있어서,
-`--clients 100`이면 자동으로 ~25개 방에 나눠 매치메이킹됩니다 — 이것도 실제로는 이 서버가
-평소에 처리하는 것과 같은 패턴(계속 방이 생성/회수되는)입니다.
+`--clients 300`이면 자동으로 ~75개 방에 나눠 매치메이킹됩니다 — 이것도 실제로는 이 서버가
+평소에 처리하는 것과 같은 패턴(계속 방이 생성/회수되는)입니다. asyncio 기반이라 클라이언트
+수를 이보다 훨씬 늘려도(수천 단위) 파이썬 쪽 병목 없이 서버 자체의 한계를 측정할 수 있습니다.
 
 출력에 총 연결/JOIN 성공 수, 초당 송수신 메시지 수(처리량), 그리고 **레이턴시 p50/p95/p99**가
 나옵니다. 이 레이턴시가 흥미로운 이유: 이 서버는 같은 pod 안에서 나누는 채팅조차 로컬에서 직접
@@ -145,24 +148,26 @@ python3 client/loadtest.py --host 127.0.0.1 --port 3800 --clients 100 --messages
 원한다면 "Redis pub/sub을 도입하기 전(로컬 직접 브로드캐스트)"과 "도입 후(지금, 항상 Redis
 왕복)"를 같은 조건에서 직접 비교하는 숫자도 뽑을 수 있습니다. **"어느 게 더 빠른가"가 아니라
 "수평 확장 능력을 얻는 대가로 지불한 지연"으로 프레이밍**하는 게 핵심입니다 — 이전 버전은
-애초에 `replicas > 1`로 못 돌아가므로 애플-투-애플 비교가 아닙니다.
+애초에 `replicas > 1`로 못 돌아가므로 애플-투-애플 비교가 아닙니다. 실제로 뽑아본 결과(300
+동시 연결 기준: p50 3배, p95 6배, p99 2.7배 증가)는 `PORTFOLIO.md`의 "성능" 절에 이미
+기록해뒀으니, 데모에서는 그 표를 그대로 보여주거나 아래처럼 라이브로 재현해도 됩니다.
 
 ```bash
 # Redis 도입 직전 커밋을 별도 워크트리로 체크아웃해서 빌드
 git worktree add /tmp/pre-redis-server 19c9603
 cd /tmp/pre-redis-server/server && make clean && make
 
-# 이전 버전 기동 (Redis 불필요) + 측정
-./server &
-python3 /path/to/client/loadtest.py --host 127.0.0.1 --port 3800 --clients 100 --messages 20
+# 이전 버전 기동 (Redis 불필요, nohup으로 띄워야 셸이 끝나도 안 죽음) + 측정
+nohup ./server > /tmp/pre-redis.log 2>&1 & disown
+python3 /path/to/client/loadtest.py --host 127.0.0.1 --port 3800 --clients 300 --messages 20
 
 # 정리
-kill %1
-git worktree remove /tmp/pre-redis-server
+kill %1 2>/dev/null; pkill -f '^\./server'
+cd - && git worktree remove /tmp/pre-redis-server
 
 # 지금 버전으로 동일 조건 측정 (Redis 필요, REDIS_HOST=127.0.0.1로 임시 변경 후)
-cd server && ./server &
-python3 ../client/loadtest.py --host 127.0.0.1 --port 3800 --clients 100 --messages 20
+cd server && nohup ./server > /tmp/current.log 2>&1 & disown
+python3 ../client/loadtest.py --host 127.0.0.1 --port 3800 --clients 300 --messages 20
 ```
 
 두 결과의 p50/p95를 나란히 놓고 "Redis 왕복 하나 추가하는 데 pXX ms가 든다, 그 대가로
