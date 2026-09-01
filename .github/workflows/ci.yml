@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # 순수 컴파일 확인 - C/C++ 혼합 빌드가 경고 없이 항상 성공하는지 빠르게 검증
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: hiredis 개발 패키지 설치
+        run: sudo apt-get update && sudo apt-get install -y libhiredis-dev
+
+      - name: make clean && make
+        run: cd server && make clean && make
+
+  # 이 프로젝트가 처음부터 유지해온 검증 방식(TSan + 동시 join/chat/leave 스트레스)을 그대로 CI에서 자동화.
+  # 로컬에서 수동으로 하던 걸 push마다 자동으로 돌려 레이스 회귀를 조기에 잡기 위함
+  tsan-smoke:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 의존성 설치
+        run: sudo apt-get update && sudo apt-get install -y libhiredis-dev python3
+
+      - name: REDIS_HOST("redis")가 서비스 컨테이너를 가리키도록 hosts 매핑
+        # k8s에서는 Service DNS가 "redis"를 자동으로 풀어주지만, 이 러너는 k8s가 아니므로
+        # 서비스 컨테이너가 노출한 localhost:6379를 "redis"라는 이름으로도 찾을 수 있게 해준다
+        # (WSL 로컬 개발 때 REDESIGN.md에 남긴 것과 동일한 우회법)
+        run: echo "127.0.0.1 redis" | sudo tee -a /etc/hosts
+
+      - name: TSan 빌드
+        run: |
+          cd server
+          make clean
+          CFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread" \
+          CXXFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread -std=c++17" \
+          LDFLAGS="-fsanitize=thread -pthread -lhiredis -no-pie" \
+          make
+
+      - name: 서버 기동
+        run: |
+          cd server
+          redis-cli -h 127.0.0.1 FLUSHALL
+          ./server > /tmp/server_tsan.log 2>&1 &
+          echo $! > /tmp/server.pid
+          sleep 1
+
+      - name: 동시 join/chat/quit 스트레스 (50 클라이언트)
+        run: |
+          cd server
+          # 인자 없는 `wait`는 "이 셸의 모든 백그라운드 job"을 기다리는데, 여기선 서버가 이전
+          # step의 셸에서 백그라운드로 떠서 이 step과는 다른 셸이라 문제가 안 되지만(단계별로
+          # 셸이 분리됨), 혼동을 피하려고 클라이언트 PID만 명시적으로 모아 그것만 기다린다
+          pids=()
+          for i in $(seq 1 50); do
+            (echo "/join"; sleep 0.05; echo "hi from $i"; sleep 0.05; echo "/quit") | \
+              timeout 5 python3 ../client/client.py --host 127.0.0.1 --port 3800 > /dev/null 2>&1 &
+            pids+=($!)
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid" || true
+          done
+
+      - name: graceful shutdown (SIGTERM)
+        run: |
+          kill -TERM "$(cat /tmp/server.pid)"
+          for i in $(seq 1 50); do
+            kill -0 "$(cat /tmp/server.pid)" 2>/dev/null || break
+            sleep 0.1
+          done
+
+      - name: 서버 로그 출력 (항상 - 디버깅용)
+        if: always()
+        run: cat /tmp/server_tsan.log
+
+      - name: TSan 데이터 레이스 리포트 있으면 실패 처리
+        run: |
+          if grep -q "WARNING: ThreadSanitizer" /tmp/server_tsan.log; then
+            echo "ThreadSanitizer가 데이터 레이스를 발견했습니다 - 위 로그 참고"
+            exit 1
+          fi
+          echo "레이스 0건 확인"
