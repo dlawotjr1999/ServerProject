@@ -308,10 +308,19 @@ int redis_room_heartbeat(int room_id, int local_count)
 		if (!r1 || r1->type == REDIS_REPLY_ERROR) { if (r1) freeReplyObject(r1); return -1; }
 		freeReplyObject(r1);
 
-		/* count_key도 lease와 같은 TTL을 줘서, 이 방을 매치메이킹 스캔이 다시 안 찾아가더라도
-		* 고아가 된 count 키가 무한정 남지 않고 스스로 만료되게 한다. 살아있는 pod은 매 하트비트마다
-		* 갱신되므로 실질적으로 만료되지 않는다 */
-		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SET %s %d EX 30", count_key, local_count);
+		/*
+		* count_key에는 일부러 TTL을 안 준다(이전 라운드에서 lease와 같은 EX 30을 줬다가 실제
+		* 크래시+30초 대기 라이브 테스트로 회귀를 잡음 - 리포트 참고). reap은 "이 방을 매치메이킹
+		* 스캔이 다시 방문할 때"라는, 시간이 얼마나 걸릴지 알 수 없는 시점에 일어난다. lease와 같은
+		* TTL을 주면, reap이 실제로 도착했을 때쯤엔 count_key도 이미 같이 만료돼 GET이 nil을
+		* 반환하고(stale=0으로 읽혀) 회수할 값 자체가 사라져서, 죽은 pod의 좌석이 영원히 회수되지
+		* 않는 채로 남는다 - 이 기능 전체가 막으려던 바로 그 누수를 재현하는 셈이라 본말전도.
+		* TTL 없이 두면 reap 루프가 실제로 이 pod을 방문할 때까지(:pods SET에서 발견 -> lease
+		* 만료 확인 -> count 읽어서 회수 -> SREM+DEL) count_key가 항상 살아있어 정확한 회수량을
+		* 읽을 수 있다. "스캔이 영원히 재방문 안 하는 방"이 쌓이는 이론적 위험은 있지만
+		* MAX_ROOMS(256)로 상한이 있는 아주 작은 키라 무시 가능한 수준이다(살아있는 pod은 매
+		* 하트비트마다 SET으로 덮어써지므로 stale 상태로 오래 남는 건 애초에 죽은 pod의 흔적뿐) */
+		redisReply* r2 = (redisReply*)redisCommand(g_redis_cmd, "SET %s %d", count_key, local_count);
 		if (!r2 || r2->type == REDIS_REPLY_ERROR) { if (r2) freeReplyObject(r2); return -1; }
 		freeReplyObject(r2);
 
