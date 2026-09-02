@@ -9,14 +9,14 @@ C로 작성한 epoll 기반 멀티스레드 TCP 채팅 서버를, 세션 재설�
 
 ## 기술 스택
 
-| 영역 | 사용 기술 |
-|---|---|
-| 서버 코어 | C(소켓/epoll/프로토콜), C++17(동시성 상태 관리), pthread |
-| 클러스터 조율 | Redis 7(hiredis 클라이언트), Lua(`EVALSHA` 원자적 매치메이킹) |
+| 영역                    | 사용 기술                                                           |
+| ----------------------- | ------------------------------------------------------------------- |
+| 서버 코어               | C(소켓/epoll/프로토콜), C++17(동시성 상태 관리), pthread            |
+| 클러스터 조율           | Redis 7(hiredis 클라이언트), Lua(`EVALSHA` 원자적 매치메이킹)       |
 | 컨테이너/오케스트레이션 | Docker(multi-stage build), Kubernetes(kind), StatefulSet/Deployment |
-| 관측성 | Prometheus(메트릭), Loki + Promtail(로그 수집), Grafana(대시보드) |
-| 검증 도구 | ThreadSanitizer(TSan), `gcc`/`g++`, 수동/스크립트 스모크 테스트 |
-| 클라이언트 | Python(테스트/데모용 TCP 클라이언트) |
+| 관측성                  | Prometheus(메트릭), Loki + Promtail(로그 수집), Grafana(대시보드)   |
+| 검증 도구               | ThreadSanitizer(TSan), `gcc`/`g++`, 수동/스크립트 스모크 테스트     |
+| 클라이언트              | Python(테스트/데모용 TCP 클라이언트)                                |
 
 ---
 
@@ -88,23 +88,45 @@ C로 작성한 epoll 기반 멀티스레드 TCP 채팅 서버를, 세션 재설�
   "로컬 배송"과 "원격 배송"을 코드 경로로 분리하지 않아, 그 둘 사이의 타이밍 차이로 생기는 레이스를
   원천적으로 피한다.
 
+### 컨테이너화
+
+`server/Dockerfile`은 멀티스테이지(`gcc:13` 빌드 → `debian:bookworm-slim` 런타임)로 최종
+이미지에 컴파일러를 남기지 않고, non-root 사용자로 실행합니다. `ENTRYPOINT ["/app/server"]`를
+**exec 형태**로 쓴 게 사소해 보여도 중요한 선택입니다 — 셸 형태(`CMD server`)로 실행하면 셸이
+컨테이너의 PID 1이 되어, `docker stop`/`kubectl delete pod`가 보내는 SIGTERM이 서버 프로세스까지
+전달되지 않습니다. 4개 worker를 `pthread_join`으로 기다리는 graceful shutdown을 아무리 잘
+구현해도, 이 한 줄이 틀리면 애초에 신호 자체가 프로세스에 도달하지 않아 전부 무의미해집니다.
+
+### 관측성 스택은 전부 선언적으로
+
+Prometheus는 `prometheus-operator`/`ServiceMonitor` 없이, `kubernetes_sd_configs(role: pod)` +
+pod annotation(`prometheus.io/scrape`, `prometheus.io/port`, `prometheus.io/path`)만으로
+chat-server를 자동 발견합니다. Grafana는 datasource(Prometheus/Loki)와 대시보드를 전부
+ConfigMap 프로비저닝으로 등록하고, datasource `uid`를 고정값으로 박아둡니다(안 그러면 클러스터를
+새로 만들 때마다 Grafana가 랜덤 UID를 발급해서 대시보드 JSON의 datasource 참조가 깨짐) —
+"클러스터를 지우고 새로 만들어도 `kubectl apply -f k8s/` 한 번이면 완전히 동일한 상태로
+돌아온다"를 지키기 위해 UI에서 손으로 클릭하는 단계를 하나도 남기지 않았습니다.
+
 ---
 
 ## 모듈 설명
 
-| 파일 | 역할 |
-|---|---|
-| `main.c` | 프로세스 진입점. 시그널 처리, worker/스레드 생성, graceful shutdown 시퀀스(`net_run()` 종료 → `g_io_q` 드레인하며 worker join 대기 → Redis 연결 정리) |
-| `net.c` | epoll 이벤트 루프, accept/recv/send, 세션 fd 관리, metrics/heartbeat 전담 스레드 소유 |
-| `protocol.c` | length-prefixed 프레이밍 파싱(TCP 스트림의 fragmentation/coalescing 처리), network byte order 변환 |
-| `job_queue.cpp` | net ↔ logic 스레드 간 job 큐(고정 크기 circular buffer + `pthread_mutex`/`cond`). blocking/non-blocking push를 모두 제공하고, 어떤 job 타입이 어느 쪽을 써야 하는지가 이 프로젝트의 핵심 설계 결정 중 하나 |
-| `logic.c` | 패킷 핸들러(JOIN/CHAT/LEAVE), logic worker 4개가 공유 |
-| `state.cpp` | 세션/방 생명주기. `session_id` 기반 신원 관리, `shared_ptr` 내부 참조 카운트, 방 매치메이킹을 Redis로 위임 |
-| `redis_client.cpp` | Redis 연결 관리(명령용/구독용 분리), `EVALSHA` 매치메이킹 Lua 스크립트, PUBLISH/SUBSCRIBE, pod lease/heartbeat, 재연결(lazy recovery) |
-| `metrics.c` | Prometheus 텍스트 포맷 메트릭 렌더링 |
-| `log.cpp` | 구조화 JSON 로그 |
-| `posix_lock.hpp` | `pthread_mutex_t`용 RAII 락 가드(`PosixLockGuard`) |
-| `k8s/*.yaml` | chat-server(Deployment)/redis(StatefulSet)/Prometheus·Loki·Promtail·Grafana(observability) 매니페스트 |
+| 파일                                          | 역할                                                                                                                                                                                                       |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main.c`                                      | 프로세스 진입점. 시그널 처리, worker/스레드 생성, graceful shutdown 시퀀스(`net_run()` 종료 → `g_io_q` 드레인하며 worker join 대기 → Redis 연결 정리)                                                      |
+| `net.c`                                       | epoll 이벤트 루프, accept/recv/send, 세션 fd 관리, metrics/heartbeat 전담 스레드 소유                                                                                                                      |
+| `protocol.c`                                  | length-prefixed 프레이밍 파싱(TCP 스트림의 fragmentation/coalescing 처리), network byte order 변환                                                                                                         |
+| `job_queue.cpp`                               | net ↔ logic 스레드 간 job 큐(고정 크기 circular buffer + `pthread_mutex`/`cond`). blocking/non-blocking push를 모두 제공하고, 어떤 job 타입이 어느 쪽을 써야 하는지가 이 프로젝트의 핵심 설계 결정 중 하나 |
+| `logic.c`                                     | 패킷 핸들러(JOIN/CHAT/LEAVE), logic worker 4개가 공유                                                                                                                                                      |
+| `state.cpp`                                   | 세션/방 생명주기. `session_id` 기반 신원 관리, `shared_ptr` 내부 참조 카운트, 방 매치메이킹을 Redis로 위임                                                                                                 |
+| `redis_client.cpp`                            | Redis 연결 관리(명령용/구독용 분리), `EVALSHA` 매치메이킹 Lua 스크립트, PUBLISH/SUBSCRIBE, pod lease/heartbeat, 재연결(lazy recovery)                                                                      |
+| `metrics.c`                                   | Prometheus 텍스트 포맷 메트릭 렌더링                                                                                                                                                                       |
+| `log.cpp`                                     | 구조화 JSON 로그                                                                                                                                                                                           |
+| `posix_lock.hpp`                              | `pthread_mutex_t`용 RAII 락 가드(`PosixLockGuard`)                                                                                                                                                         |
+| `server/Dockerfile`                           | 멀티스테이지 빌드(`gcc:13` → `debian:bookworm-slim`), non-root 실행, exec 형태 `ENTRYPOINT`(SIGTERM 전달 보장)                                                                                             |
+| `k8s/chat-server.yaml`                        | chat-server Deployment(`replicas: 3`) + Service + ConfigMap                                                                                                                                                |
+| `k8s/redis.yaml`                              | Redis StatefulSet(`replicas: 1`, emptyDir) + Service                                                                                                                                                       |
+| `k8s/{prometheus,loki,promtail,grafana}.yaml` | 관측성 스택 — pod annotation 기반 Prometheus 자동 discovery, DaemonSet 기반 로그 수집(Promtail→Loki), ConfigMap 기반 Grafana 프로비저닝                                                                    |
 
 ---
 
@@ -137,17 +159,22 @@ C로 작성한 epoll 기반 멀티스레드 TCP 채팅 서버를, 세션 재설�
 생각합니다. 전체 스토리는 `REDESIGN.md`/`REDESIGN_CPP.md`에 훨씬 자세히 남아 있고, 아래는 그중
 포트폴리오에서 보여줄 만한 것들만 추린 것입니다.
 
-| # | 문제 | 어떻게 발견 | 해결 |
-|---|---|---|---|
-| 1 | k8s liveness probe로 fd가 빠르게 재사용되면서, fd 기반 세션 식별이 깨짐 | 관측성 스택(Loki) 도입 후 실제 로그에서 발견 | `session_id` 기반 재설계 (REDESIGN.md §2-4) |
-| 2 | 세션 참조 카운트 1차 수정이 레이스를 18건→1501건으로 폭증시킴 | TSan | `alive` 갱신과 `room_id` 읽기를 하나의 락 구간으로 통합 |
-| 3 | C++ 마이그레이션 중 락 해제 후 `room_id`를 다시 읽는 실수 재도입 | TSan (또 잡아냄) | 락 안에서 로컬 변수로 캡처 후 사용 |
-| 4 | cross-pod 채팅에서 자기 자신 제외 판정이 **pod-로컬** `session_id`를 비교 — 서로 다른 pod의 세션이 우연히 같은 id를 가지면 메시지가 조용히 유실 | 실제 3-replica kind 클러스터 통합 테스트(단일 프로세스 테스트로는 재현 불가능한 종류) | Redis `INCR`로 클러스터 전역 유일 id(`global_id`) 발급, 자기제외 판정만 이걸로 교체 |
-| 5 | SIGTERM 시 방에 유저가 남아있으면 이미 정리된 Redis 커넥션을 참조해 세그폴트 | 전체 브랜치 재검토(스트레스 테스트가 아니라 코드를 처음부터 다시 읽는 방식) | Redis 연결 정리를 모든 worker join 이후로 이동 |
-| 6 | 위 5번 수정이 `g_rooms_lock`을 쥔 채로 blocking queue push를 하게 만들어 **새 데드락**을 만듦 | 수정에 대한 독립적인 재검토(수정자의 "안전하다"는 진술을 그대로 믿지 않음) | 해당 push를 non-blocking으로 전환 |
-| 7 | pod lease/heartbeat 최초 구현에서 하트비트 명령 순서(SADD 먼저) 때문에 살아있는 pod이 잘못 회수될 수 있었음 | 코드 리뷰 | `lease → count → SADD` 순서로 재정렬 |
-| 8 | 위 리뷰 수정 라운드에서 "고아 키 방지"로 count 키에 lease와 같은 TTL을 준 것이 **기능 전체를 무력화**하는 회귀였음(reap이 도착하기 전에 count도 같이 만료) | 실제 crash+30초 대기 라이브 테스트 | count 키 TTL 제거 |
-| 9 | net 스레드를 blocking I/O에서 자유롭게 만든 수정(non-blocking 큐 push)이, CHAT뿐 아니라 JOIN/LEAVE 요청도 조용히 드롭할 수 있게 만듦 | 외부 코드 리뷰 | JOIN/LEAVE 전용 blocking push 경로 분리 |
+| #   | 문제                                                                                                                                                                                          | 어떻게 발견                                                                                                                                                                                                                                                                                         | 해결                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| 1   | Promtail DaemonSet/RBAC/ConfigMap을 전부 올바르게 배포했는데도 Loki에 로그가 하나도 안 쌓임 — Promtail 자체 로그엔 에러가 없어서 "정상인데 조용히 아무것도 안 하는" 가장 까다로운 부류의 장애 | Promtail의 자체 디버그 UI(`/targets`, `/config`)를 직접 열어, **내가 쓴 설정이 아니라 실제로 로드된 설정**을 확인 — `field: spec.nodeName=<pod 이름>`처럼 nodeName 자리에 pod 이름이 들어가 있는 걸 발견(k8s 컨테이너의 기본 `HOSTNAME`이 pod 이름이라 DaemonSet의 자동 노드 필터가 항상 매칭 실패) | downward API로 `HOSTNAME`을 `spec.nodeName`으로 덮어씀 (`k8s/promtail.yaml`)        |
+| 2   | k8s liveness probe로 fd가 빠르게 재사용되면서, fd 기반 세션 식별이 깨짐                                                                                                                       | 관측성 스택(Loki) 도입 후 실제 로그에서 발견                                                                                                                                                                                                                                                        | `session_id` 기반 재설계 (REDESIGN.md §2-4)                                         |
+| 3   | 세션 참조 카운트 1차 수정이 레이스를 18건→1501건으로 폭증시킴                                                                                                                                 | TSan                                                                                                                                                                                                                                                                                                | `alive` 갱신과 `room_id` 읽기를 하나의 락 구간으로 통합                             |
+| 4   | C++ 마이그레이션 중 락 해제 후 `room_id`를 다시 읽는 실수 재도입                                                                                                                              | TSan (또 잡아냄)                                                                                                                                                                                                                                                                                    | 락 안에서 로컬 변수로 캡처 후 사용                                                  |
+| 5   | cross-pod 채팅에서 자기 자신 제외 판정이 **pod-로컬** `session_id`를 비교 — 서로 다른 pod의 세션이 우연히 같은 id를 가지면 메시지가 조용히 유실                                               | 실제 3-replica kind 클러스터 통합 테스트(단일 프로세스 테스트로는 재현 불가능한 종류)                                                                                                                                                                                                               | Redis `INCR`로 클러스터 전역 유일 id(`global_id`) 발급, 자기제외 판정만 이걸로 교체 |
+| 6   | SIGTERM 시 방에 유저가 남아있으면 이미 정리된 Redis 커넥션을 참조해 세그폴트                                                                                                                  | 전체 브랜치 재검토(스트레스 테스트가 아니라 코드를 처음부터 다시 읽는 방식)                                                                                                                                                                                                                         | Redis 연결 정리를 모든 worker join 이후로 이동                                      |
+| 7   | 위 6번 수정이 `g_rooms_lock`을 쥔 채로 blocking queue push를 하게 만들어 **새 데드락**을 만듦                                                                                                 | 수정에 대한 독립적인 재검토(수정자의 "안전하다"는 진술을 그대로 믿지 않음)                                                                                                                                                                                                                          | 해당 push를 non-blocking으로 전환                                                   |
+| 8   | pod lease/heartbeat 최초 구현에서 하트비트 명령 순서(SADD 먼저) 때문에 살아있는 pod이 잘못 회수될 수 있었음                                                                                   | 코드 리뷰                                                                                                                                                                                                                                                                                           | `lease → count → SADD` 순서로 재정렬                                                |
+| 9   | 위 리뷰 수정 라운드에서 "고아 키 방지"로 count 키에 lease와 같은 TTL을 준 것이 **기능 전체를 무력화**하는 회귀였음(reap이 도착하기 전에 count도 같이 만료)                                    | 실제 crash+30초 대기 라이브 테스트                                                                                                                                                                                                                                                                  | count 키 TTL 제거                                                                   |
+| 10  | net 스레드를 blocking I/O에서 자유롭게 만든 수정(non-blocking 큐 push)이, CHAT뿐 아니라 JOIN/LEAVE 요청도 조용히 드롭할 수 있게 만듦                                                          | 외부 코드 리뷰                                                                                                                                                                                                                                                                                      | JOIN/LEAVE 전용 blocking push 경로 분리                                             |
+
+1번(Promtail)이 특히 인프라 트러블슈팅으로서 곱씹을 만한 사례입니다 — "에러 로그가 없다"가
+"정상이다"를 의미하지 않는다는 걸 보여주는 전형적인 케이스였고, 이후 서버 코드 쪽 버그들(2~10)도
+전부 같은 태도(내가 짠 게 아니라 실제로 무슨 일이 일어났는지 직접 확인)로 잡았습니다.
 
 공통 패턴: **정적 코드 리뷰와 동적 테스트(TSan, 실제 클러스터, 라이브 크래시 재현)가 서로 다른
 종류의 버그를 잡는다**는 것, 그리고 **수정 자체가 새 버그를 만들 수 있어서 "고쳤다"를 그대로 믿지
@@ -166,6 +193,10 @@ C로 작성한 epoll 기반 멀티스레드 TCP 채팅 서버를, 세션 재설�
   만료되는 것까지 기다려 자동 복구를 확인(단축된 타임아웃이 아니라 실제 30초 값으로)
 - **graceful shutdown**: 방에 유저가 남아있는 상태로 SIGTERM을 보내는 걸 표준 회귀 테스트로 반복
   사용(이 시나리오가 여러 버그를 실제로 잡아냄)
+- **관측성 스택 자체의 가치를 직접 증명**: `kubectl delete pod`로 pod을 강제 삭제하면 그 pod의
+  로그는 `kubectl logs`로 더 이상 못 보지만, Loki 쿼리로는 4개 worker의 `shutdown_started`/
+  `shutdown_completed` 로그가 그대로 남아있는 걸 확인 — "왜 중앙집중 로그 수집이 필요한가"를
+  텍스트로 설명하는 대신 실제로 pod를 지워보고 증명
 
 ---
 
@@ -185,11 +216,11 @@ C로 작성한 epoll 기반 멀티스레드 TCP 채팅 서버를, 세션 재설�
 
 동시 연결 300, 클라이언트당 메시지 20개, 총 1.7만~1.8만 개 레이턴시 샘플 기준(`asyncio` 버전):
 
-| 버전 | 설명 | p50 | p95 | p99 | max |
-|---|---|---|---|---|---|
-| ① `71ff0c6` | 최초 버전 (fd 기반 세션, 순수 C) | 3.31 ms | 14.51 ms | 34.94 ms | 77.52 ms |
-| ② `19c9603` | 세션 재설계(`session_id`) + C++ 혼용, Redis 이전 | 3.27 ms | 15.09 ms | 37.01 ms | 59.34 ms |
-| ③ 현재 | Redis pub/sub 포함(같은 pod 안에서도 항상 Redis 왕복) | **9.84 ms** | **91.84 ms** | **101.73 ms** | 105.50 ms |
+| 버전        | 설명                                                  | p50         | p95          | p99           | max       |
+| ----------- | ----------------------------------------------------- | ----------- | ------------ | ------------- | --------- |
+| ① `71ff0c6` | 최초 버전 (fd 기반 세션, 순수 C)                      | 3.31 ms     | 14.51 ms     | 34.94 ms      | 77.52 ms  |
+| ② `19c9603` | 세션 재설계(`session_id`) + C++ 혼용, Redis 이전      | 3.27 ms     | 15.09 ms     | 37.01 ms      | 59.34 ms  |
+| ③ 현재      | Redis pub/sub 포함(같은 pod 안에서도 항상 Redis 왕복) | **9.84 ms** | **91.84 ms** | **101.73 ms** | 105.50 ms |
 
 **해석:**
 
