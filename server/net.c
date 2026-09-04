@@ -288,7 +288,7 @@ static void* metrics_thread_main(void* arg)
 {
 	(void)arg;
 
-	while (!g_terminate) {
+	while (!atomic_load(&g_terminate)) {
 		struct pollfd pfd;
 		pfd.fd = metrics_listen_fd;
 		pfd.events = POLLIN;
@@ -316,11 +316,11 @@ static void* heartbeat_thread_main(void* arg)
 {
 	(void)arg;
 
-	while (!g_terminate) {
-		for (int waited = 0; waited < 10 && !g_terminate; ++waited) {
+	while (!atomic_load(&g_terminate)) {
+		for (int waited = 0; waited < 10 && !atomic_load(&g_terminate); ++waited) {
 			sleep(1);
 		}
-		if (g_terminate) break;
+		if (atomic_load(&g_terminate)) break;
 
 		state_heartbeat_local_rooms();
 	}
@@ -538,7 +538,7 @@ void net_run() {
 	struct epoll_event events[MAX_EVENTS];
 
 	/* 종료 신호(g_terminate)가 오기 전까지 무한 루프 */
-	while (!g_terminate) {
+	while (!atomic_load(&g_terminate)) {
 
 		/* 이벤트(timeout = -1)가 올 때까지 epoll 대기 */
 		int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
@@ -622,7 +622,7 @@ void net_run() {
 					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
 					g_net_ready = false;   /* readiness probe가 즉시 실패해 트래픽이 끊김 */
 					g_redis_fatal = 1;     /* main이 종료 코드 1로 빠져나가게 함 */
-					g_terminate = 1;       /* 아래 epoll 루프 조건에서 정상 종료 절차 시작 */
+					atomic_store(&g_terminate, 1);   /* 아래 epoll 루프 조건에서 정상 종료 절차 시작 */
 				}
 				continue;
 			}

@@ -47,13 +47,18 @@ jobs:
         run: echo "127.0.0.1 redis" | sudo tee -a /etc/hosts
 
       - name: TSan 빌드
+        # 주의: server/Makefile이 CFLAGS/CXXFLAGS/LDFLAGS를 `:=`로 이미 정의해두고 있어서,
+        # 환경변수로 앞에 붙이는(export) 방식은 GNU Make의 우선순위상 무시된다(makefile 대입이
+        # 일반 환경변수보다 우선함, `-e` 옵션 없이는). 실제로 이 방식으로 빌드하면 TSan이 전혀
+        # 링크되지 않은 채 통과해버리는 걸 로컬 WSL 재현으로 확인했다 - 반드시 `make VAR=값`처럼
+        # 커맨드라인 인자로 넘겨야 makefile 대입을 덮어쓴다
         run: |
           cd server
           make clean
-          CFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread" \
-          CXXFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread -std=c++17" \
-          LDFLAGS="-fsanitize=thread -pthread -lhiredis -no-pie" \
-          make
+          make \
+            CFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread" \
+            CXXFLAGS="-Wall -Wextra -O0 -g -fsanitize=thread -pthread -std=c++17" \
+            LDFLAGS="-fsanitize=thread -pthread -lhiredis -no-pie"
 
       - name: 서버 기동
         run: |

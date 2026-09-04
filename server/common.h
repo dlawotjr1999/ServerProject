@@ -20,6 +20,15 @@
 #include <unistd.h>
 #include <errno.h>
 
+/* stdatomic.h는 C11 헤더라 C++(job_queue.cpp/log.cpp/redis_client.cpp/state.cpp)에서 직접
+* include하면 컴파일 에러가 남 - g_terminate 타입 선언만 언어별로 분기한다(실제 atomic_load/
+* atomic_store 호출은 C 파일인 main.c/net.c에서만 함) */
+#ifdef __cplusplus
+#include <atomic>
+#else
+#include <stdatomic.h>
+#endif
+
 
 #define PORTNUM 3800
 #define METRICS_PORT 9100
@@ -38,7 +47,17 @@
 #define WORKER_THREAD_NUM 4
 #define JOB_QUEUE_SIZE 1024
 
-extern volatile sig_atomic_t g_terminate;
+/*
+* metrics_thread_main()/heartbeat_thread_main()이 net 스레드와 별도로 이 값을 읽으므로,
+* volatile sig_atomic_t(시그널 핸들러<->같은 스레드 가시성만 보장)로는 스레드 간 가시성이
+* 보장되지 않아 TSan이 실제 데이터 레이스로 잡아냄. atomic_int로 교체해 스레드 간 접근을
+* atomic_load/atomic_store로 통일한다
+*/
+#ifdef __cplusplus
+extern std::atomic<int> g_terminate;
+#else
+extern atomic_int g_terminate;
+#endif
 
 /*
 * 복구 불가능한 Redis 런타임 장애(구독 연결 유실)로 종료하는 중인지 나타내는 플래그

@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include "common.h"
 #include "net.h"
@@ -28,10 +29,12 @@ job_queue_t g_logic_q;
 job_queue_t g_io_q;
 
 /*
-* g_terminate는 시그널 핸들러에서 비동기적으로 변경되므로, 컴파일러가 루프에서 값을 레지스터에 캐시하거나 읽기를 생략하는 최적화를 하면 변경을 못 보고 무한 루프가 될 수 있음
-* volatile 키워드를 통해 이런 최적화를 막아 매번 메모리에서 값을 다시 읽게 해서, 시그널로 바뀐 종료 플래그를 놓치지 않게 함
+* g_terminate는 시그널 핸들러(main 스레드)뿐 아니라 metrics/heartbeat 전담 스레드도 읽는다.
+* volatile sig_atomic_t는 "시그널 핸들러 <-> 같은 스레드"의 재정렬만 막아줄 뿐 스레드 간
+* 가시성은 보장하지 않아 TSan이 데이터 레이스로 잡아냈다(net.c의 metrics_thread_main).
+* atomic_int + atomic_load/atomic_store로 교체해 스레드 간 접근에도 안전하게 만든다
 */
-volatile sig_atomic_t g_terminate = 0;
+atomic_int g_terminate = 0;
 
 /*
 * Redis 구독 연결이 런타임에 끊겨서(재시작/네트워크 단절) 종료하는 경우 net.c가 1로 올린다
@@ -42,7 +45,7 @@ volatile sig_atomic_t g_redis_fatal = 0;
 /* SIGINT(Ctrl+C) / SIGTERM(종료 요청) 수신 시 종료 플래그 설정 */
 void handle_sigint(int sig) {
 	if (sig == SIGINT || sig == SIGTERM)
-		g_terminate = 1;
+		atomic_store(&g_terminate, 1);
 }
 
 int main() {
