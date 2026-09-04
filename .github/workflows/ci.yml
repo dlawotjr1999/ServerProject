@@ -38,7 +38,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 의존성 설치
-        run: sudo apt-get update && sudo apt-get install -y libhiredis-dev python3
+        # redis-tools(redis-cli)가 빠져 있어서 "서버 기동" 단계의 `redis-cli -h 127.0.0.1 FLUSHALL`이
+        # "command not found"(exit 127)로 죽던 문제 수정 - health-check의 redis-cli는 Redis 서비스
+        # 컨테이너 안에서 실행되는 것이라 이 러너 자체에는 별도로 설치해야 함
+        run: sudo apt-get update && sudo apt-get install -y libhiredis-dev python3 redis-tools
 
       - name: REDIS_HOST("redis")가 서비스 컨테이너를 가리키도록 hosts 매핑
         # k8s에서는 Service DNS가 "redis"를 자동으로 풀어주지만, 이 러너는 k8s가 아니므로
